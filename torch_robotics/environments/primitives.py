@@ -341,6 +341,231 @@ class MultiRoundedBoxField(MultiBoxField):
 # This creates smoother cost functions, which are important to gradient-based optimization methods.
 MultiBoxField = MultiRoundedBoxField
 
+class MultiHollowBoxField(PrimitiveShapeField):
+
+    def __init__(self, centers, sizes, wall_thickness, tensor_args=None):
+        """
+        Parameters
+        ----------
+            centers : numpy array
+                Center of the boxes.
+            sizes: numpy array
+                Outer sizes of the boxes.
+            wall_thickness: float or numpy array
+                Thickness of the box walls.
+        """
+        super().__init__(dim=centers.shape[-1], tensor_args=tensor_args)
+        self.centers = to_torch(centers, **self.tensor_args)
+        self.sizes = to_torch(sizes, **self.tensor_args)
+        self.wall_thickness = to_torch(wall_thickness, **self.tensor_args)
+        self.half_sizes = self.sizes / 2
+
+    def __repr__(self):
+        return f"MultiHollowBoxField(centers={self.centers}, sizes={self.sizes}, wall_thickness={self.wall_thickness})"
+
+    def compute_signed_distance_impl(self, x):
+        # GPT-generated code (not inspected well)
+
+        # Compute distances to the outer box
+        distance_to_outer = torch.abs(x.unsqueeze(-2) - self.centers.unsqueeze(0))
+        sdf_outer = torch.max(distance_to_outer - self.half_sizes.unsqueeze(0), dim=-1)[0]
+        
+        # # Compute distances to the inner box (subtracting wall thickness)
+        # inner_half_sizes = self.half_sizes - self.wall_thickness
+        # distance_to_inner = torch.abs(x.unsqueeze(-2) - self.centers.unsqueeze(0))
+        # sdf_inner = torch.max(inner_half_sizes.unsqueeze(0) - distance_to_inner, dim=-1)[0]
+
+        # # Combine the SDFs: points within the wall thickness will have a positive SDF
+        # sdf_hollow = torch.max(sdf_outer, sdf_inner)
+        # return torch.min(sdf_hollow, dim=-1)[0]
+        return torch.min(sdf_outer, dim=-1)[0]
+
+    def add_to_occupancy_map(self, obst_map):
+        for center, size, thickness in zip(self.centers, self.sizes, self.wall_thickness):
+            n_dim = len(center)
+            width = size[0]
+            height = size[1]
+            inner_width = width - 2 * thickness[0]
+            inner_height = height - 2 * thickness[1]
+            
+            # Convert dims to cell indices
+            w = ceil(width / obst_map.cell_size)
+            h = ceil(height / obst_map.cell_size)
+            iw = ceil(inner_width / obst_map.cell_size)
+            ih = ceil(inner_height / obst_map.cell_size)
+            c_x = ceil(center[0] / obst_map.cell_size)
+            c_y = ceil(center[1] / obst_map.cell_size)
+
+            obst_map_origin_xi = obst_map.origin[0]
+            obst_map_origin_yi = obst_map.origin[1]
+
+            if n_dim == 2:
+                # Outer box
+                obst_map.map[
+                    c_y - ceil(h / 2.) + obst_map_origin_yi:c_y + ceil(h / 2.) + obst_map_origin_yi,
+                    c_x - ceil(w / 2.) + obst_map_origin_xi:c_x + ceil(w / 2.) + obst_map_origin_xi
+                ] += 1
+                # Inner box (subtract to create hollow space)
+                obst_map.map[
+                    c_y - ceil(ih / 2.) + obst_map_origin_yi:c_y + ceil(ih / 2.) + obst_map_origin_yi,
+                    c_x - ceil(iw / 2.) + obst_map_origin_xi:c_x + ceil(iw / 2.) + obst_map_origin_xi
+                ] -= 1
+            else:
+                depth = size[2]
+                inner_depth = depth - 2 * thickness[2]
+                c_z = ceil(center[2] / obst_map.cell_size)
+                obst_map_origin_zi = obst_map.origin[2]
+                d = ceil(depth / obst_map.cell_size)
+                id = ceil(inner_depth / obst_map.cell_size)
+                
+                # Outer box
+                obst_map.map[
+                    c_y - ceil(h / 2.) + obst_map_origin_yi:c_y + ceil(h / 2.) + obst_map_origin_yi,
+                    c_x - ceil(w / 2.) + obst_map_origin_xi:c_x + ceil(w / 2.) + obst_map_origin_xi,
+                    c_z - ceil(d / 2.) + obst_map_origin_zi:c_z + ceil(d / 2.) + obst_map_origin_zi
+                ] += 1
+                
+                # Inner box (subtract to create hollow space)
+                obst_map.map[
+                    c_y - ceil(ih / 2.) + obst_map_origin_yi:c_y + ceil(ih / 2.) + obst_map_origin_yi,
+                    c_x - ceil(iw / 2.) + obst_map_origin_xi:c_x + ceil(iw / 2.) + obst_map_origin_xi,
+                ] -= 1
+        return obst_map
+    
+    def render(self, ax, pos=None, ori=None, color='gray', cmap='gray', **kwargs):
+
+        rot = q_to_rotation_matrix(ori).squeeze()
+        if ax.name == '3d':
+            x, y, z = self.get_cube()
+            for center, size, thickness in zip(self.centers, self.sizes, self.wall_thickness):
+                cx, cy, cz = center
+                a, b, c = size
+                ta, tb, tc = thickness
+
+                # Render outer box
+                points_x = cx + x * a
+                points_y = cy + y * b
+                points_z = cz + z * c
+                self._plot_surface(ax, points_x, points_y, points_z, rot, pos, cmap, alpha=0.25, color=color)
+
+                # Render inner box (hollow area)
+                inner_a = a - 2 * ta
+                inner_b = b - 2 * tb
+                inner_c = c - 2 * tc
+                points_x = cx + x * inner_a
+                points_y = cy + y * inner_b
+                points_z = cz + z * inner_c
+                self._plot_surface(ax, points_x, points_y, points_z, rot, pos, cmap, alpha=0.25, color='white')
+        else:
+            for i, (center, size, thickness) in enumerate(zip(self.centers, self.sizes, self.wall_thickness)):
+                cx, cy = to_numpy(center)
+                a, b = to_numpy(size)
+                ta, tb = to_numpy(thickness)
+                pos_np = to_numpy(pos)
+                # by definition a rotation in the xy-plane is around the z-axis
+                rot_np = to_numpy(rot[:2, :2])
+
+                # Draw outer box
+                point = np.array([cx - a / 2, cy - b / 2])
+                self.draw_box(ax, i, point, a, b, rot_np, pos_np[:2], color=color)
+
+                # Draw inner box (hollow area)
+                inner_a = a - 2 * ta
+                inner_b = b - 2 * tb
+                point_inner = np.array([cx - inner_a / 2, cy - inner_b / 2])
+                self.draw_box(ax, i, point_inner, inner_a, inner_b, rot_np, pos_np[:2], color='white')
+
+    def _plot_surface(self, ax, points_x, points_y, points_z, rot, pos, cmap, alpha, color):
+        points = torch.stack((points_x.ravel(), points_y.ravel(), points_z.ravel()), dim=-1)
+        points = transform_point(points, rot, pos)
+
+        d = points_x.shape[0]
+        points_x = points[:, 0].view(d, d)
+        points_y = points[:, 1].view(d, d)
+        points_z = points[:, 2].view(d, d)
+
+        points_x_np, points_y_np, points_z_np = to_numpy(points_x), to_numpy(points_y), to_numpy(points_z)
+        ax.plot_surface(points_x_np, points_y_np, points_z_np, cmap=cmap, color=color, alpha=alpha)
+
+    def draw_box(self, ax, i, point, a, b, rot, trans, color='gray'):
+        rectangle = plt.Rectangle((point[0], point[1]), a, b,
+                              color=color, linewidth=0, alpha=1)
+        patch_rotate_translate(ax, rectangle, rot, trans)
+        ax.add_patch(rectangle)
+
+import torch
+from matplotlib.patches import FancyBboxPatch, BoxStyle
+
+class MultiRoundedHollowBoxField(MultiHollowBoxField):
+
+    def __init__(self, centers, sizes, wall_thickness, tensor_args=None):
+        """
+        Parameters
+        ----------
+            centers : numpy array
+                Center of the boxes.
+            sizes : numpy array
+                Outer sizes of the boxes.
+            wall_thickness : numpy array
+                Thickness of the walls for the hollow boxes.
+        """
+        super().__init__(centers, sizes, wall_thickness, tensor_args=tensor_args)
+        self.wall_thickness = to_torch(wall_thickness, **self.tensor_args)
+        self.inner_half_sizes = self.half_sizes - self.wall_thickness / 2
+        self.radius = torch.min(self.sizes, dim=-1)[0] * 0.15  # empirical value
+
+    def compute_signed_distance_impl(self, x):
+        # GPT-generated code (not inspected well)
+
+        # Compute distances to the outer rounded box
+        distance_to_outer_centers = torch.abs(x.unsqueeze(-2) - self.centers.unsqueeze(0))
+        q_outer = distance_to_outer_centers - self.half_sizes.unsqueeze(0) + self.radius.unsqueeze(0).unsqueeze(-1)
+        max_q_outer = torch.amax(q_outer, dim=-1)
+        sdf_outer = torch.minimum(max_q_outer, torch.zeros_like(max_q_outer)) + torch.linalg.norm(torch.relu(q_outer), dim=-1) - self.radius.unsqueeze(0)
+
+        # # Compute distances to the inner rounded box (hollow space)
+        # inner_half_sizes = self.inner_half_sizes
+        # q_inner = distance_to_outer_centers - inner_half_sizes.unsqueeze(0) + self.radius.unsqueeze(0).unsqueeze(-1)
+        # max_q_inner = torch.amax(q_inner, dim=-1)
+        # sdf_inner = torch.minimum(max_q_inner, torch.zeros_like(max_q_inner)) + torch.linalg.norm(torch.relu(q_inner), dim=-1) - self.radius.unsqueeze(0)
+
+        # # Combine SDFs: points within the wall thickness will have a positive SDF
+        # sdf_hollow = torch.max(sdf_outer, sdf_inner)
+        # return torch.min(sdf_hollow, dim=-1)[0]
+        return torch.min(sdf_outer, dim=-1)[0]
+
+    def draw_box(self, ax, i, point, a, b, rot, trans, color='gray'):
+        # Draw outer rounded box
+        rounded_box_outer = FancyBboxPatch(
+            (point[0], point[1]), a, b, color=color,
+            boxstyle=BoxStyle.Round(pad=0., rounding_size=to_numpy(self.radius[i]).item())
+        )
+        patch_rotate_translate(ax, rounded_box_outer, rot, trans)
+        
+        # Calculate inner box dimensions
+        inner_a = a - 2 * to_numpy(self.wall_thickness[i, 0]).item()
+        inner_b = b - 2 * to_numpy(self.wall_thickness[i, 1]).item()
+        point_inner = np.array([point[0] + to_numpy(self.wall_thickness[i, 0]).item(), 
+                                point[1] + to_numpy(self.wall_thickness[i, 1]).item()])
+        
+        # Draw inner rounded box (hollow area)
+        rounded_box_inner = FancyBboxPatch(
+            (point_inner[0], point_inner[1]), inner_a, inner_b, color='white',
+            boxstyle=BoxStyle.Round(pad=0., rounding_size=to_numpy(self.radius[i]).item())
+        )
+        patch_rotate_translate(ax, rounded_box_inner, rot, trans)
+
+    def render(self, ax, pos=None, ori=None, color='gray', **kwargs):
+        rot = q_to_rotation_matrix(ori).squeeze()
+        for i, (center, size, thickness) in enumerate(zip(self.centers, self.sizes, self.wall_thickness)):
+            cx, cy = to_numpy(center)
+            a, b = to_numpy(size)
+            pos_np = to_numpy(pos)
+            rot_np = to_numpy(rot[:2, :2])
+            point = np.array([cx - a / 2, cy - b / 2])
+            self.draw_box(ax, i, point, a, b, rot_np, pos_np[:2], color)
+
+MultiHollowBoxField = MultiRoundedHollowBoxField
 
 # TODO - NEEDS CHECKING
 # class MultiInfiniteCylinderField(PrimitiveShapeField):
@@ -594,8 +819,13 @@ if __name__ == '__main__':
     boxes = MultiBoxField(torch.zeros(2, **tensor_args).view(1, -1) + 0.5,
                           torch.ones(2, **tensor_args).view(1, -1) * 0.3,
                           tensor_args=tensor_args)
+    
+    hollow_boxes = MultiHollowBoxField(torch.zeros(2, **tensor_args).view(1, -1) + 0.3,
+                          torch.ones(2, **tensor_args).view(1, -1) * 0.3,
+                          wall_thickness = torch.tensor([[0.1, 0.1]], **tensor_args),
+                          tensor_args=tensor_args)
 
-    obj_field = ObjectField([spheres, boxes])
+    obj_field = ObjectField([spheres, boxes, hollow_boxes])
 
     theta = np.deg2rad(45)
     # obj_field.set_position_orientation(pos=[-0.5, 0., 0.])
