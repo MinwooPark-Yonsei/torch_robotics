@@ -81,6 +81,10 @@ class EnvDense2D(EnvBase):
                     tensor_args=tensor_args
                 )
             )
+            
+        self.circle_loc = circle_loc
+        self.box_loc = box_loc
+        self.hollow_box_loc = hollow_box_loc
 
         super().__init__(
             name=name,
