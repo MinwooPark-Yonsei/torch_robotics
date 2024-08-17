@@ -153,6 +153,40 @@ class EnvDense2D(EnvBase):
             return params
         else:
             raise NotImplementedError
+        
+    def extract_env_as_array(self, current_state:np.ndarray, goal_state:np.ndarray, grid_size=(64, 64), marker_size=3):
+        x_vals = np.linspace(self.limits_np[0][0], self.limits_np[1][0], grid_size[0])
+        y_vals = np.linspace(self.limits_np[1][1], self.limits_np[0][1], grid_size[1])
+        
+        grid_x, grid_y = np.meshgrid(x_vals, y_vals)
+        grid_points = np.stack([grid_x, grid_y], axis=-1).reshape(-1, 2)
+    
+        grid_points_tensor = torch.tensor(grid_points, **self.tensor_args)
+        sdf_values = self.compute_sdf(grid_points_tensor).cpu().numpy().reshape(grid_size)
+        
+        img = np.ones((*grid_size, 3))
+        img[sdf_values < 0] = [0.5, 0.5, 0.5]
+        
+        current_idx = np.round(((current_state - self.limits_np[0]) / (self.limits_np[1] - self.limits_np[0])) * (np.array(grid_size) - 1)).astype(int)
+        goal_idx = np.round(((goal_state - self.limits_np[0]) / (self.limits_np[1] - self.limits_np[0])) * (np.array(grid_size) - 1)).astype(int)
+        
+        current_idx[1] = grid_size[1] - 1 - current_idx[1]
+        goal_idx[1] = grid_size[1] - 1 - goal_idx[1]
+        
+        current_idx = np.clip(current_idx, 0, np.array(grid_size) - 1)
+        goal_idx = np.clip(goal_idx, 0, np.array(grid_size) - 1)
+        
+        def fill_marker(image, idx, color, marker_size):
+            x_min = max(idx[0] - marker_size, 0)
+            x_max = min(idx[0] + marker_size + 1, grid_size[0])
+            y_min = max(idx[1] - marker_size, 0)
+            y_max = min(idx[1] + marker_size + 1, grid_size[1])
+            image[y_min:y_max, x_min:x_max] = color
+        
+        fill_marker(img, current_idx, [0, 0, 1], marker_size)
+        fill_marker(img, goal_idx, [1, 0, 0], marker_size)
+        
+        return img
 
 
 if __name__ == '__main__':
