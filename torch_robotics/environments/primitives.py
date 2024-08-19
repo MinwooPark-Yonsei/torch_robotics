@@ -493,9 +493,6 @@ class MultiHollowBoxField(PrimitiveShapeField):
         patch_rotate_translate(ax, rectangle, rot, trans)
         ax.add_patch(rectangle)
 
-import torch
-from matplotlib.patches import FancyBboxPatch, BoxStyle
-
 class MultiRoundedHollowBoxField(MultiHollowBoxField):
 
     def __init__(self, centers, sizes, wall_thickness, tensor_args=None):
