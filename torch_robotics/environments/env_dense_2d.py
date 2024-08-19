@@ -4,7 +4,7 @@ from matplotlib import pyplot as plt
 import time
 
 from torch_robotics.environments.env_base import EnvBase
-from torch_robotics.environments.primitives import ObjectField, MultiSphereField, MultiBoxField, MultiHollowBoxField
+from torch_robotics.environments.primitives import ObjectField, MultiSphereField, MultiBoxField, MultiTriangleField, MultiHollowBoxField
 from torch_robotics.environments.utils import create_grid_spheres
 from torch_robotics.robots import RobotPointMass
 from torch_robotics.torch_utils.torch_utils import DEFAULT_TENSOR_ARGS
@@ -21,9 +21,11 @@ class EnvDense2D(EnvBase):
                  seed=None,
                  circle_num=10,
                  box_num=10,
+                 triangle_num=0,
                  hollow_box_num=0,
                  addtional_circles=None,
                  additional_boxes=None,
+                 additional_triangles=None,
                  additional_hollow_boxes=None,
                  **kwargs
                  ):
@@ -37,6 +39,8 @@ class EnvDense2D(EnvBase):
         circle_r = np.array([0.125] * circle_num)
         box_loc = np.random.uniform(-1, 1, (box_num, 2))
         box_wh = np.array([[0.2, 0.2]] * box_num)
+        triangle_loc = np.random.uniform(-1, 1, (triangle_num, 2))
+        triangle_len = np.array([[0.2]] * triangle_num)
         hollow_box_loc = np.random.uniform(-1, 1, (hollow_box_num, 2))
         hollow_box_wh = np.array([[0.5, 0.5]] * hollow_box_num)
         wall_thickness = np.array([[0.1, 0.1]])
@@ -47,12 +51,16 @@ class EnvDense2D(EnvBase):
         if additional_boxes:
             box_loc = np.concatenate((box_loc, additional_boxes[0]))
             box_wh = np.concatenate((box_wh, additional_boxes[1]))
+        if additional_triangles:
+            triangle_loc = np.concatenate((triangle_loc, additional_triangles[0]))
+            triangle_len = np.concatenate((triangle_len, additional_triangles[1]))
         if additional_hollow_boxes:
             hollow_box_loc = np.concatenate((hollow_box_loc, additional_hollow_boxes[0]))
             hollow_box_wh = np.concatenate((hollow_box_wh, additional_hollow_boxes[1]))
         
         print("circle pos:\n", circle_loc)
         print("box pos:\n", box_loc)
+        print("triangle pos:\n", triangle_loc)
         print("hollow box pos:\n", hollow_box_loc)
 
         obj_list = []
@@ -72,6 +80,14 @@ class EnvDense2D(EnvBase):
                     tensor_args=tensor_args
                 )
             )
+        if triangle_num or additional_triangles:
+            obj_list.append(
+                MultiTriangleField(
+                    triangle_loc,
+                    triangle_len,
+                    tensor_args=tensor_args
+                )
+            )
         if hollow_box_num or additional_hollow_boxes:
             obj_list.append(
                 MultiHollowBoxField(
@@ -84,6 +100,7 @@ class EnvDense2D(EnvBase):
             
         self.circle_loc = circle_loc
         self.box_loc = box_loc
+        self.triangle_loc = triangle_loc
         self.hollow_box_loc = hollow_box_loc
 
         super().__init__(

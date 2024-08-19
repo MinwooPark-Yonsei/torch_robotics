@@ -7,7 +7,7 @@ import einops
 import numpy as np
 import torch
 from matplotlib import pyplot as plt, transforms
-from matplotlib.patches import FancyBboxPatch, BoxStyle
+from matplotlib.patches import FancyBboxPatch, BoxStyle, Polygon
 from torch.autograd.functional import jacobian
 
 from torch_robotics.torch_kinematics_tree.geometrics.quaternion import q_to_rotation_matrix
@@ -340,6 +340,91 @@ class MultiRoundedBoxField(MultiBoxField):
 # Use a rounded box instead of a box by default.
 # This creates smoother cost functions, which are important to gradient-based optimization methods.
 MultiBoxField = MultiRoundedBoxField
+
+class MultiTriangleField(PrimitiveShapeField):
+    def __init__(self, centers, lengths, tensor_args=None):
+        """
+        Parameters
+        ----------
+            centers : numpy array
+                Center positions of the triangles. Shape should be (n_triangles, 2).
+            lengths : numpy array
+                Lengths of the legs of the triangles. Shape should be (n_triangles, 1).
+        """
+        super().__init__(dim=centers.shape[-1], tensor_args=tensor_args)
+        self.centers = to_torch(centers, **self.tensor_args)
+        self.lengths = to_torch(lengths, **self.tensor_args)
+        self.vertices = self.compute_vertices()
+
+    def compute_vertices(self):
+        """
+        Compute the vertices of each right triangle given the centers and lengths of the legs.
+        The vertices are computed assuming the right angle is at the origin and the triangle is aligned with the x and y axes.
+        """
+        # Compute half lengths for easier vertex calculation
+        half_lengths = self.lengths / 2
+
+        # Calculate the three vertices for each triangle
+        v0 = torch.stack([self.centers[:, 0] - half_lengths[:, 0], self.centers[:, 1] - np.sqrt(3) / 3 * half_lengths[:, 0]], dim=-1)
+        v1 = torch.stack([self.centers[:, 0] + half_lengths[:, 0], self.centers[:, 1] - np.sqrt(3) / 3 * half_lengths[:, 0]], dim=-1)
+        v2 = torch.stack([self.centers[:, 0], self.centers[:, 1] + 2 * np.sqrt(3) / 3 * half_lengths[:, 0]], dim=-1)
+
+        # Stack vertices together into a tensor of shape (n_triangles, 3, 2)
+        vertices = torch.stack([v0, v1, v2], dim=1)
+        return vertices
+
+    def compute_signed_distance_impl(self, x):
+        """
+        Compute the signed distance from point x to the closest triangle in the field.
+        """
+        # GPT generated, not revised yet
+
+        # sdf_list = []
+        # for triangle in self.vertices:
+        #     v0, v1, v2 = triangle
+
+        #     # Compute edges
+        #     e0 = v1 - v0
+        #     e1 = v2 - v1
+        #     e2 = v0 - v2
+
+        #     # Compute normals
+        #     n0 = torch.tensor([-e0[1], e0[0]], **self.tensor_args)
+        #     n1 = torch.tensor([-e1[1], e1[0]], **self.tensor_args)
+        #     n2 = torch.tensor([-e2[1], e2[0]], **self.tensor_args)
+
+        #     # Compute distances to edges
+        #     print(x - v0)
+        #     d0 = torch.dot(n0, x - v0)
+        #     d1 = torch.dot(n1, x - v1)
+        #     d2 = torch.dot(n2, x - v2)
+
+        #     # Compute SDF for the triangle
+        #     sdf = torch.max(torch.tensor([d0, d1, d2], **self.tensor_args))
+        #     sdf_list.append(sdf)
+
+        # # Return the minimum distance to any triangle
+        # return torch.min(torch.stack(sdf_list))
+        raise NotImplementedError
+
+    def add_to_occupancy_map(self, obst_map):
+        """
+        Adds triangles to the occupancy map.
+        """
+        for triangle in self.vertices:
+            v0, v1, v2 = to_numpy(triangle)
+            polygon = Polygon([v0, v1, v2], closed=True)
+            # Add the polygon to the occupancy map (implementation needed based on specific occupancy map structure)
+            pass
+
+    def render(self, ax, pos=None, ori=None, color='gray', **kwargs):
+        """
+        Render the triangles in the given axis.
+        """
+        for triangle in self.vertices:
+            v0, v1, v2 = to_numpy(triangle)
+            polygon = Polygon([v0, v1, v2], closed=True, color=color)
+            ax.add_patch(polygon)
 
 class MultiHollowBoxField(PrimitiveShapeField):
 
