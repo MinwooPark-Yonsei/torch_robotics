@@ -47,17 +47,33 @@ class EnvDense2D(EnvBase):
         wall_thickness = np.array([[0.1, 0.1]])
 
         if addtional_circles:
-            circle_loc = np.concatenate((circle_loc, addtional_circles[0]))
-            circle_r = np.concatenate((circle_r, addtional_circles[1]))
+            if circle_num == 0:
+                circle_loc = addtional_circles[0]
+                circle_r = addtional_circles[1]
+            else:
+                circle_loc = np.concatenate((circle_loc, addtional_circles[0]))
+                circle_r = np.concatenate((circle_r, addtional_circles[1]))
         if additional_boxes:
-            box_loc = np.concatenate((box_loc, additional_boxes[0]))
-            box_wh = np.concatenate((box_wh, additional_boxes[1]))
+            if box_num == 0:
+                box_loc = additional_boxes[0]
+                box_wh = additional_boxes[1]
+            else:
+                box_loc = np.concatenate((box_loc, additional_boxes[0]))
+                box_wh = np.concatenate((box_wh, additional_boxes[1]))
         if additional_triangles:
-            triangle_loc = np.concatenate((triangle_loc, additional_triangles[0]))
-            triangle_len = np.concatenate((triangle_len, additional_triangles[1]))
+            if triangle_num == 0:
+                triangle_loc = additional_triangles[0]
+                triangle_len = additional_triangles[1]
+            else:
+                triangle_loc = np.concatenate((triangle_loc, additional_triangles[0]))
+                triangle_len = np.concatenate((triangle_len, additional_triangles[1]))
         if additional_hollow_boxes:
-            hollow_box_loc = np.concatenate((hollow_box_loc, additional_hollow_boxes[0]))
-            hollow_box_wh = np.concatenate((hollow_box_wh, additional_hollow_boxes[1]))
+            if hollow_box_num == 0:
+                hollow_box_loc = additional_hollow_boxes[0]
+                hollow_box_wh = additional_hollow_boxes[1]
+            else:
+                hollow_box_loc = np.concatenate((hollow_box_loc, additional_hollow_boxes[0]))
+                hollow_box_wh = np.concatenate((hollow_box_wh, additional_hollow_boxes[1]))
         
         print("circle pos:\n", circle_loc)
         print("box pos:\n", box_loc)
@@ -188,7 +204,6 @@ class EnvDense2D(EnvBase):
         
         img = np.ones((*grid_size, 3)) # white for background
         obstacle_rgb = to_rgb(color)
-        print(obstacle_rgb)
         img[sdf_values < 0] = obstacle_rgb
         
         current_idx = np.round(((current_state - self.limits_np[0]) / (self.limits_np[1] - self.limits_np[0])) * (np.array(grid_size) - 1)).astype(int)
