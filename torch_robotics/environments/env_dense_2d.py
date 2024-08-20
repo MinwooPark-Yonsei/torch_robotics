@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from matplotlib import pyplot as plt
+from matplotlib.colors import to_rgb
 import time
 
 from torch_robotics.environments.env_base import EnvBase
@@ -175,7 +176,7 @@ class EnvDense2D(EnvBase):
         else:
             raise NotImplementedError
         
-    def extract_env_as_array(self, current_state:np.ndarray, goal_state:np.ndarray, grid_size=(64, 64), marker_size=3):
+    def extract_env_as_array(self, current_state:np.ndarray, goal_state:np.ndarray, grid_size=(64, 64), marker_size=3, color='gray'):
         x_vals = np.linspace(self.limits_np[0][0], self.limits_np[1][0], grid_size[0])
         y_vals = np.linspace(self.limits_np[1][1], self.limits_np[0][1], grid_size[1])
         
@@ -185,8 +186,10 @@ class EnvDense2D(EnvBase):
         grid_points_tensor = torch.tensor(grid_points, **self.tensor_args)
         sdf_values = self.compute_sdf(grid_points_tensor).cpu().numpy().reshape(grid_size)
         
-        img = np.ones((*grid_size, 3))
-        img[sdf_values < 0] = [0.5, 0.5, 0.5]
+        img = np.ones((*grid_size, 3)) # white for background
+        obstacle_rgb = to_rgb(color)
+        print(obstacle_rgb)
+        img[sdf_values < 0] = obstacle_rgb
         
         current_idx = np.round(((current_state - self.limits_np[0]) / (self.limits_np[1] - self.limits_np[0])) * (np.array(grid_size) - 1)).astype(int)
         goal_idx = np.round(((goal_state - self.limits_np[0]) / (self.limits_np[1] - self.limits_np[0])) * (np.array(grid_size) - 1)).astype(int)

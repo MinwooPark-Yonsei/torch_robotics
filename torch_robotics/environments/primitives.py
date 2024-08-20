@@ -109,7 +109,7 @@ class MultiSphereField(PrimitiveShapeField):
         distance_to_centers = torch.norm(x.unsqueeze(-2) - self.centers.unsqueeze(0), dim=-1)
         # sdfs = distance_to_centers - self.radii.unsqueeze(0)
         sdfs = distance_to_centers - self.radii
-        return torch.min(sdfs, dim=-1)[0]
+        return torch.min(sdfs, dim=-1)[0].squeeze()
 
     def zero_grad(self):
         self.centers.grad = None
@@ -375,37 +375,109 @@ class MultiTriangleField(PrimitiveShapeField):
 
     def compute_signed_distance_impl(self, x):
         """
-        Compute the signed distance from point x to the closest triangle in the field.
+        Compute the signed distance from each point in x to the closest triangle in the field.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            A tensor of shape (batch_size, 1, 2) where each row represents a 2D point (x, y).
+
+        Returns
+        -------
+        torch.Tensor
+            A tensor of shape (batch_size, 1) containing the signed distance for each point.
         """
-        # GPT generated, not revised yet
 
-        # sdf_list = []
-        # for triangle in self.vertices:
-        #     v0, v1, v2 = triangle
+        def is_point_in_triangle(x, v0, v1, v2):
+            """
+            Check if a point x is inside a triangle defined by vertices v0, v1, v2.
 
-        #     # Compute edges
-        #     e0 = v1 - v0
-        #     e1 = v2 - v1
-        #     e2 = v0 - v2
+            Parameters
+            ----------
+            x : torch.Tensor
+                A tensor of shape (batch_size, 2) representing points.
+            v0, v1, v2 : torch.Tensor
+                Tensors of shape (2,) representing the vertices of the triangle.
+            
+            Returns
+            -------
+            torch.Tensor
+                A tensor of shape (batch_size,) containing True for points inside the triangle, False otherwise.
+            """
+            def sign(p1, p2, p3):
+                return (p1[:, 0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[:, 1] - p3[1])
 
-        #     # Compute normals
-        #     n0 = torch.tensor([-e0[1], e0[0]], **self.tensor_args)
-        #     n1 = torch.tensor([-e1[1], e1[0]], **self.tensor_args)
-        #     n2 = torch.tensor([-e2[1], e2[0]], **self.tensor_args)
+            d1 = sign(x, v0, v1)
+            d2 = sign(x, v1, v2)
+            d3 = sign(x, v2, v0)
 
-        #     # Compute distances to edges
-        #     print(x - v0)
-        #     d0 = torch.dot(n0, x - v0)
-        #     d1 = torch.dot(n1, x - v1)
-        #     d2 = torch.dot(n2, x - v2)
+            has_neg = (d1 < 0) | (d2 < 0) | (d3 < 0)
+            has_pos = (d1 > 0) | (d2 > 0) | (d3 > 0)
 
-        #     # Compute SDF for the triangle
-        #     sdf = torch.max(torch.tensor([d0, d1, d2], **self.tensor_args))
-        #     sdf_list.append(sdf)
+            return ~(has_neg & has_pos)
 
-        # # Return the minimum distance to any triangle
-        # return torch.min(torch.stack(sdf_list))
-        raise NotImplementedError
+        def point_to_segment_distance(x, p1, p2):
+            """
+            Calculate the distance from each point in x to the line segment defined by p1 and p2.
+            
+            Parameters
+            ----------
+            x : torch.Tensor
+                A tensor of shape (batch_size, 2) representing points.
+            p1, p2 : torch.Tensor
+                Tensors of shape (2,) representing the vertices of the line segment.
+            
+            Returns
+            -------
+            torch.Tensor
+                A tensor of shape (batch_size,) containing the distance for each point.
+            """
+            segment_vec = p2 - p1
+            point_vec = x - p1
+            segment_len_sq = torch.sum(segment_vec ** 2)
+
+            # Projection of the point onto the line (as a scalar)
+            t = torch.sum(point_vec * segment_vec, dim=1) / segment_len_sq
+
+            # Clamp t to the range [0, 1] to ensure projection is on the segment
+            t = torch.clamp(t, 0, 1)
+
+            # Find the closest point on the segment to the point
+            projection = p1 + t[:, None] * segment_vec
+
+            # Calculate the distance from the point to the closest point on the segment
+            return torch.norm(x - projection, dim=1)
+
+        # Initialize an empty list to store the signed distances for each point
+        sdf_list = []
+
+        for triangle in self.vertices:
+            v0, v1, v2 = triangle
+            v0 = torch.tensor(v0, **self.tensor_args)
+            v1 = torch.tensor(v1, **self.tensor_args)
+            v2 = torch.tensor(v2, **self.tensor_args)
+
+            # Check if points are inside the triangle
+            inside = is_point_in_triangle(x.squeeze(-2), v0, v1, v2)
+
+            # Calculate the distances to the edges of the triangle
+            dist_v0_v1 = point_to_segment_distance(x.squeeze(-2), v0, v1)
+            dist_v1_v2 = point_to_segment_distance(x.squeeze(-2), v1, v2)
+            dist_v2_v0 = point_to_segment_distance(x.squeeze(-2), v2, v0)
+
+            # Combine the distances into one tensor
+            dist_to_edges = torch.stack([dist_v0_v1, dist_v1_v2, dist_v2_v0], dim=-1)
+
+            # Calculate the signed distance for each point
+            signed_distances = torch.where(inside, -torch.min(dist_to_edges, dim=-1)[0], torch.min(dist_to_edges, dim=-1)[0])
+
+            sdf_list.append(signed_distances)
+
+        # Stack all sdf results and take the minimum signed distance across all triangles
+        sdf_list = torch.stack(sdf_list, dim=-1)
+        final_sdf = torch.min(sdf_list, dim=-1)[0]
+
+        return final_sdf
 
     def add_to_occupancy_map(self, obst_map):
         """
@@ -421,10 +493,34 @@ class MultiTriangleField(PrimitiveShapeField):
         """
         Render the triangles in the given axis.
         """
+        if pos is None:
+            pos = self.pos
+        if ori is None:
+            ori = self.ori
+
+        rot = q_to_rotation_matrix(ori).squeeze()
+
         for triangle in self.vertices:
             v0, v1, v2 = to_numpy(triangle)
+            
+            # Convert vertices to tensors and add a z-dimension (set to 0) for compatibility
+            v0 = torch.tensor([v0[0], v0[1], 0.0], **self.tensor_args)
+            v1 = torch.tensor([v1[0], v1[1], 0.0], **self.tensor_args)
+            v2 = torch.tensor([v2[0], v2[1], 0.0], **self.tensor_args)
+            
+            # Apply position and rotation
+            v0 = transform_point(v0, rot, pos)
+            v1 = transform_point(v1, rot, pos)
+            v2 = transform_point(v2, rot, pos)
+
+            # Convert back to 2D by discarding the z-coordinate
+            v0 = to_numpy(v0[:2])
+            v1 = to_numpy(v1[:2])
+            v2 = to_numpy(v2[:2])
+
             polygon = Polygon([v0, v1, v2], closed=True, color=color)
             ax.add_patch(polygon)
+
 
 class MultiHollowBoxField(PrimitiveShapeField):
 
@@ -463,7 +559,7 @@ class MultiHollowBoxField(PrimitiveShapeField):
         # # Combine the SDFs: points within the wall thickness will have a positive SDF
         # sdf_hollow = torch.max(sdf_outer, sdf_inner)
         # return torch.min(sdf_hollow, dim=-1)[0]
-        return torch.min(sdf_outer, dim=-1)[0]
+        return torch.min(sdf_outer, dim=-1)[0].squeeze()
 
     def add_to_occupancy_map(self, obst_map):
         for center, size, thickness in zip(self.centers, self.sizes, self.wall_thickness):
@@ -614,7 +710,7 @@ class MultiRoundedHollowBoxField(MultiHollowBoxField):
         # # Combine SDFs: points within the wall thickness will have a positive SDF
         # sdf_hollow = torch.max(sdf_outer, sdf_inner)
         # return torch.min(sdf_hollow, dim=-1)[0]
-        return torch.min(sdf_outer, dim=-1)[0]
+        return torch.min(sdf_outer, dim=-1)[0].squeeze()
 
     def draw_box(self, ax, i, point, a, b, rot, trans, color='gray'):
         # Draw outer rounded box
@@ -898,7 +994,11 @@ if __name__ == '__main__':
                                torch.ones(1, **tensor_args).view(1, -1) * 0.3,
                                tensor_args=tensor_args)
 
-    boxes = MultiBoxField(torch.zeros(2, **tensor_args).view(1, -1) + 0.5,
+    # boxes = MultiBoxField(torch.zeros(2, **tensor_args).view(1, -1) + 0.5,
+                        #   torch.ones(2, **tensor_args).view(1, -1) * 0.3,
+                        #   tensor_args=tensor_args)
+    
+    triangles = MultiTriangleField(torch.zeros(2, **tensor_args).view(1, -1) + 0.5,
                           torch.ones(2, **tensor_args).view(1, -1) * 0.3,
                           tensor_args=tensor_args)
     
@@ -907,7 +1007,7 @@ if __name__ == '__main__':
                           wall_thickness = torch.tensor([[0.1, 0.1]], **tensor_args),
                           tensor_args=tensor_args)
 
-    obj_field = ObjectField([spheres, boxes, hollow_boxes])
+    obj_field = ObjectField([spheres, triangles, hollow_boxes])
 
     theta = np.deg2rad(45)
     # obj_field.set_position_orientation(pos=[-0.5, 0., 0.])
