@@ -28,6 +28,7 @@ class EnvDense2D(EnvBase):
                  additional_boxes=None,
                  additional_triangles=None,
                  additional_hollow_boxes=None,
+                 color='gray',
                  **kwargs
                  ):
         
@@ -120,6 +121,8 @@ class EnvDense2D(EnvBase):
         self.triangle_loc = triangle_loc
         self.hollow_box_loc = hollow_box_loc
 
+        self.color = color
+
         super().__init__(
             name=name,
             limits=torch.tensor([[-1, -1], [1, 1]], **tensor_args),  # environments limits
@@ -192,7 +195,7 @@ class EnvDense2D(EnvBase):
         else:
             raise NotImplementedError
         
-    def extract_env_as_array(self, current_state:np.ndarray, goal_state:np.ndarray, grid_size=(64, 64), marker_size=3, color='gray'):
+    def extract_env_as_array(self, current_state:np.ndarray, goal_state:np.ndarray, grid_size=(64, 64), marker_size=3):
         x_vals = np.linspace(self.limits_np[0][0], self.limits_np[1][0], grid_size[0])
         y_vals = np.linspace(self.limits_np[1][1], self.limits_np[0][1], grid_size[1])
         
@@ -203,7 +206,7 @@ class EnvDense2D(EnvBase):
         sdf_values = self.compute_sdf(grid_points_tensor).cpu().numpy().reshape(grid_size)
         
         img = np.ones((*grid_size, 3)) # white for background
-        obstacle_rgb = to_rgb(color)
+        obstacle_rgb = to_rgb(self.color)
         img[sdf_values < 0] = obstacle_rgb
         
         current_idx = np.round(((current_state - self.limits_np[0]) / (self.limits_np[1] - self.limits_np[0])) * (np.array(grid_size) - 1)).astype(int)
