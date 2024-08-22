@@ -226,7 +226,19 @@ class EnvDense2D(EnvBase):
             image[y_min:y_max, x_min:x_max] = color
         
         fill_marker(img, current_idx, [0, 0, 1], marker_size)
-        fill_marker(img, goal_idx, [1, 0, 0], marker_size)
+        # fill_marker(img, goal_idx, [1, 0, 0], marker_size)
+
+        # Handle multiple goals
+        if goal_state.ndim == 1:  # Single goal state
+            goal_states = [goal_state]
+        else:  # Multiple goal states
+            goal_states = goal_state
+
+        for goal in goal_states:
+            goal_idx = np.round(((goal - self.limits_np[0]) / (self.limits_np[1] - self.limits_np[0])) * (np.array(grid_size) - 1)).astype(int)
+            goal_idx[1] = grid_size[1] - 1 - goal_idx[1]
+            goal_idx = np.clip(goal_idx, 0, np.array(grid_size) - 1)
+            fill_marker(img, goal_idx, [1, 0, 0], marker_size)
         
         return img
 
