@@ -380,30 +380,21 @@ class MultiTriangleField(PrimitiveShapeField):
         Parameters
         ----------
         x : torch.Tensor
-            A tensor of shape (batch_size, 1, 2) where each row represents a 2D point (x, y).
+            A tensor of shape (batch_size, 1, 2) or (batch_size, 2) where each row represents a 2D point (x, y).
 
         Returns
         -------
         torch.Tensor
-            A tensor of shape (batch_size, 1) containing the signed distance for each point.
+            A tensor of shape (batch_size, 1) or (batch_size) containing the signed distance for each point.
         """
 
-        def is_point_in_triangle(x, v0, v1, v2):
-            """
-            Check if a point x is inside a triangle defined by vertices v0, v1, v2.
+        # Check the input shape and set a flag to determine if we need to unsqueeze the output
+        unsqueeze_output = False
+        if x.dim() == 2 and x.shape[1] == 2:
+            x = x.unsqueeze(1)  # Change shape from [batch_size, 2] to [batch_size, 1, 2]
+            unsqueeze_output = True  # We'll need to squeeze the output back to [batch_size]
 
-            Parameters
-            ----------
-            x : torch.Tensor
-                A tensor of shape (batch_size, 2) representing points.
-            v0, v1, v2 : torch.Tensor
-                Tensors of shape (2,) representing the vertices of the triangle.
-            
-            Returns
-            -------
-            torch.Tensor
-                A tensor of shape (batch_size,) containing True for points inside the triangle, False otherwise.
-            """
+        def is_point_in_triangle(x, v0, v1, v2):
             def sign(p1, p2, p3):
                 return (p1[:, 0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[:, 1] - p3[1])
 
@@ -417,38 +408,16 @@ class MultiTriangleField(PrimitiveShapeField):
             return ~(has_neg & has_pos)
 
         def point_to_segment_distance(x, p1, p2):
-            """
-            Calculate the distance from each point in x to the line segment defined by p1 and p2.
-            
-            Parameters
-            ----------
-            x : torch.Tensor
-                A tensor of shape (batch_size, 2) representing points.
-            p1, p2 : torch.Tensor
-                Tensors of shape (2,) representing the vertices of the line segment.
-            
-            Returns
-            -------
-            torch.Tensor
-                A tensor of shape (batch_size,) containing the distance for each point.
-            """
             segment_vec = p2 - p1
             point_vec = x - p1
             segment_len_sq = torch.sum(segment_vec ** 2)
 
-            # Projection of the point onto the line (as a scalar)
             t = torch.sum(point_vec * segment_vec, dim=1) / segment_len_sq
-
-            # Clamp t to the range [0, 1] to ensure projection is on the segment
             t = torch.clamp(t, 0, 1)
-
-            # Find the closest point on the segment to the point
             projection = p1 + t[:, None] * segment_vec
 
-            # Calculate the distance from the point to the closest point on the segment
             return torch.norm(x - projection, dim=1)
 
-        # Initialize an empty list to store the signed distances for each point
         sdf_list = []
 
         for triangle in self.vertices:
@@ -457,27 +426,24 @@ class MultiTriangleField(PrimitiveShapeField):
             v1 = torch.tensor(v1, **self.tensor_args)
             v2 = torch.tensor(v2, **self.tensor_args)
 
-            # Check if points are inside the triangle
             inside = is_point_in_triangle(x.squeeze(-2), v0, v1, v2)
-
-            # Calculate the distances to the edges of the triangle
             dist_v0_v1 = point_to_segment_distance(x.squeeze(-2), v0, v1)
             dist_v1_v2 = point_to_segment_distance(x.squeeze(-2), v1, v2)
             dist_v2_v0 = point_to_segment_distance(x.squeeze(-2), v2, v0)
 
-            # Combine the distances into one tensor
             dist_to_edges = torch.stack([dist_v0_v1, dist_v1_v2, dist_v2_v0], dim=-1)
-
-            # Calculate the signed distance for each point
             signed_distances = torch.where(inside, -torch.min(dist_to_edges, dim=-1)[0], torch.min(dist_to_edges, dim=-1)[0])
 
             sdf_list.append(signed_distances)
 
-        # Stack all sdf results and take the minimum signed distance across all triangles
         sdf_list = torch.stack(sdf_list, dim=-1)
         final_sdf = torch.min(sdf_list, dim=-1)[0]
-        
-        return final_sdf.unsqueeze(-1)
+
+        # Adjust output shape based on the original input shape
+        if unsqueeze_output:
+            return final_sdf  # Return shape [batch_size]
+        else:
+            return final_sdf.unsqueeze(-1)  # Return shape [batch_size, 1]
 
     def add_to_occupancy_map(self, obst_map):
         """
