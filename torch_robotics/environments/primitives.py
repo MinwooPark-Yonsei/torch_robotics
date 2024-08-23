@@ -109,7 +109,7 @@ class MultiSphereField(PrimitiveShapeField):
         distance_to_centers = torch.norm(x.unsqueeze(-2) - self.centers.unsqueeze(0), dim=-1)
         # sdfs = distance_to_centers - self.radii.unsqueeze(0)
         sdfs = distance_to_centers - self.radii
-        return torch.min(sdfs, dim=-1)[0].squeeze()
+        return torch.min(sdfs, dim=-1)[0]
 
     def zero_grad(self):
         self.centers.grad = None
@@ -476,8 +476,8 @@ class MultiTriangleField(PrimitiveShapeField):
         # Stack all sdf results and take the minimum signed distance across all triangles
         sdf_list = torch.stack(sdf_list, dim=-1)
         final_sdf = torch.min(sdf_list, dim=-1)[0]
-
-        return final_sdf
+        
+        return final_sdf.unsqueeze(-1)
 
     def add_to_occupancy_map(self, obst_map):
         """
@@ -559,7 +559,7 @@ class MultiHollowBoxField(PrimitiveShapeField):
         # # Combine the SDFs: points within the wall thickness will have a positive SDF
         # sdf_hollow = torch.max(sdf_outer, sdf_inner)
         # return torch.min(sdf_hollow, dim=-1)[0]
-        return torch.min(sdf_outer, dim=-1)[0].squeeze()
+        return torch.min(sdf_outer, dim=-1)[0]
 
     def add_to_occupancy_map(self, obst_map):
         for center, size, thickness in zip(self.centers, self.sizes, self.wall_thickness):
@@ -710,7 +710,7 @@ class MultiRoundedHollowBoxField(MultiHollowBoxField):
         # # Combine SDFs: points within the wall thickness will have a positive SDF
         # sdf_hollow = torch.max(sdf_outer, sdf_inner)
         # return torch.min(sdf_hollow, dim=-1)[0]
-        return torch.min(sdf_outer, dim=-1)[0].squeeze()
+        return torch.min(sdf_outer, dim=-1)[0]
 
     def draw_box(self, ax, i, point, a, b, rot, trans, color='gray'):
         # Draw outer rounded box
