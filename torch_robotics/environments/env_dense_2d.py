@@ -195,7 +195,7 @@ class EnvDense2D(EnvBase):
         else:
             raise NotImplementedError
         
-    def extract_env_as_array(self, current_state:np.ndarray, goal_state:np.ndarray, grid_size=(64, 64), marker_size=3):
+    def extract_env_as_array(self, current_state:np.ndarray, goal_state:np.ndarray, grid_size=(64, 64), marker_size=1):
         x_vals = np.linspace(self.limits_np[0][0], self.limits_np[1][0], grid_size[0])
         y_vals = np.linspace(self.limits_np[1][1], self.limits_np[0][1], grid_size[1])
         
