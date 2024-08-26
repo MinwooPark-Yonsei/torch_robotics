@@ -35,7 +35,7 @@ class EnvDense2D(EnvBase):
         if seed is None:
             seed = int(np.random.rand() * 2**32 - 1)
         np.random.seed(seed)        
-        print("seed:", seed)
+        # print("seed:", seed)
 
         circle_loc = np.random.uniform(-1, 1, (circle_num, 2))
         circle_r = np.array([0.125] * circle_num)
@@ -76,10 +76,10 @@ class EnvDense2D(EnvBase):
                 hollow_box_loc = np.concatenate((hollow_box_loc, additional_hollow_boxes[0]))
                 hollow_box_wh = np.concatenate((hollow_box_wh, additional_hollow_boxes[1]))
         
-        print("circle pos:\n", circle_loc)
-        print("box pos:\n", box_loc)
-        print("triangle pos:\n", triangle_loc)
-        print("hollow box pos:\n", hollow_box_loc)
+        # print("circle pos:\n", circle_loc)
+        # print("box pos:\n", box_loc)
+        # print("triangle pos:\n", triangle_loc)
+        # print("hollow box pos:\n", hollow_box_loc)
 
         obj_list = []
         if circle_num or addtional_circles:
