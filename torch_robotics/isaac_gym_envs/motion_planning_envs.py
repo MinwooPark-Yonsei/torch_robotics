@@ -15,6 +15,7 @@ from isaacgym.torch_utils import *
 
 import torch
 
+from deps.isaacgym.python.isaacgym.torch_utils import to_torch
 from torch_robotics.environments import EnvTableShelf
 from torch_robotics.environments.env_spheres_3d import EnvSpheres3D
 from torch_robotics.environments.primitives import MultiSphereField, MultiBoxField
@@ -185,12 +186,12 @@ class PandaMotionPlanningIsaacGymEnv:
                  show_goal_configuration=True,
                  sync_with_real_time=False,
                  show_collision_spheres=False,  # very slow implementation. use only one robots
+                 collor_robots_in_collision=False,
                  show_contact_forces=False,
                  dt=1./25.,  # dt of motion planning
                  lower_level_controller_frequency=1000,
                  **kwargs,
     ):
-
         self.env = env
         self.robot = robot
         self.task = task
@@ -200,6 +201,7 @@ class PandaMotionPlanningIsaacGymEnv:
         self.all_robots_in_one_env = all_robots_in_one_env
         self.color_robots = color_robots
 
+        self.collor_robots_in_collision = collor_robots_in_collision
         self.show_collision_spheres = show_collision_spheres
         self.show_contact_forces = show_contact_forces
 
@@ -378,7 +380,7 @@ class PandaMotionPlanningIsaacGymEnv:
             # add franka
             # Set to 0 to enable self-collision. By default we do not consider self-collision because the collision
             # meshes are too conservative.
-            franka_handle = self.gym.create_actor(env, franka_asset, franka_pose, "franka", i, 2)
+            franka_handle = self.gym.create_actor(env, franka_asset, franka_pose, "franka", i, 0)
             self.franka_handles.append(franka_handle)
             rb_names = self.gym.get_actor_rigid_body_names(env, franka_handle)
             for j in range(len(rb_names)):
@@ -595,12 +597,13 @@ class PandaMotionPlanningIsaacGymEnv:
                 gymutil.draw_lines(self.axes_geom, self.gym, self.viewer, env, ee_transform)
 
                 # color frankas in collision
-                if k in envs_with_robot_in_contact:
-                    n_rigid_bodies = self.gym.get_actor_rigid_body_count(env, franka_handle)
-                    # color = gymapi.Vec3(1., 0., 0.)
-                    color = gymapi.Vec3(0., 0., 0.)
-                    for j in range(n_rigid_bodies):
-                        self.gym.set_rigid_body_color(env, franka_handle, j, gymapi.MESH_VISUAL_AND_COLLISION, color)
+                if self.collor_robots_in_collision:
+                    if k in envs_with_robot_in_contact:
+                        n_rigid_bodies = self.gym.get_actor_rigid_body_count(env, franka_handle)
+                        # color = gymapi.Vec3(1., 0., 0.)
+                        color = gymapi.Vec3(0., 0., 0.)
+                        for j in range(n_rigid_bodies):
+                            self.gym.set_rigid_body_color(env, franka_handle, j, gymapi.MESH_VISUAL_AND_COLLISION, color)
 
                 # collision spheres
                 if self.show_collision_spheres:
@@ -610,7 +613,8 @@ class PandaMotionPlanningIsaacGymEnv:
                     fk_link_pos = self.robot.fk_map_collision(joint_pos_curr)
                     fk_link_pos = fk_link_pos[..., self.robot.link_idxs_for_object_collision_checking, :]
                     fk_link_pos = interpolate_points_v1(fk_link_pos, self.robot.num_interpolated_points_for_object_collision_checking).squeeze(0)
-                    for j, (link_pos, margin) in enumerate(zip(fk_link_pos, self.robot.link_margins_for_object_collision_checking_tensor)):
+                    radii = self.robot.link_margins_for_object_collision_checking_tensor
+                    for j, (link_pos, margin) in enumerate(zip(fk_link_pos, radii)):
                         link_transform = gymapi.Transform(p=gymapi.Vec3(*link_pos))
                         sphere_geom = gymutil.WireframeSphereGeometry(margin, 5, 5, gymapi.Transform(), color=(0, 0, 1))
                         gymutil.draw_lines(sphere_geom, self.gym, self.viewer, env, link_transform)
@@ -696,11 +700,11 @@ class MotionPlanningController:
             joint_states, envs_with_robot_in_contact = self.mp_env.step(actions, visualize=visualize, render_viewer_camera=render_viewer_camera)
             envs_with_robot_in_contact_l.append(envs_with_robot_in_contact)
             # stop the trajectory if the robots was in contact with the environments
-            if len(envs_with_robot_in_contact) > 0:
-                if self.mp_env.controller_type == 'position':
-                    trajectories_copy[i:, envs_with_robot_in_contact, :] = actions[envs_with_robot_in_contact, :]
-                elif self.mp_env.controller_type == 'velocity':
-                    trajectories_copy[i:, envs_with_robot_in_contact, :] = 0.
+            # if len(envs_with_robot_in_contact) > 0:
+            #     if self.mp_env.controller_type == 'position':
+            #         trajectories_copy[i:, envs_with_robot_in_contact, :] = actions[envs_with_robot_in_contact, :]
+            #     elif self.mp_env.controller_type == 'velocity':
+            #         trajectories_copy[i:, envs_with_robot_in_contact, :] = 0.
 
         # last steps -- keep robots in place
         if self.mp_env.controller_type == 'position':
@@ -735,7 +739,7 @@ class MotionPlanningController:
                 if idx not in envs_with_robot_in_contact_unique:
                     envs_with_robot_in_contact_unique.append(idx)
 
-        print(f'trajectories free: {B-len(envs_with_robot_in_contact_unique)}/{B}')
+        print(f'trajectories free in Isaac: {B-len(envs_with_robot_in_contact_unique)}/{B}')
 
 
 if __name__ == '__main__':
