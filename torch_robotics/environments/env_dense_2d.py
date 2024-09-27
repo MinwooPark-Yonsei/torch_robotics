@@ -191,6 +191,29 @@ class EnvDense2D(EnvBase):
         fill_marker(img, goal_idx, [1, 0, 0], marker_size)
         
         return img
+    
+    def extract_obstacle_mask(self):
+        xs = torch.linspace(self.limits_np[0][0], self.limits_np[1][0], steps=200, **self.tensor_args)
+        ys = torch.linspace(self.limits_np[0][1], self.limits_np[1][1], steps=200, **self.tensor_args)
+        if self.dim == 3:
+            zs = torch.linspace(self.limits_np[0][2], self.limits_np[1][2], steps=200, **self.tensor_args)
+            X, Y, Z = torch.meshgrid(xs, ys, zs, indexing='xy')
+        else:
+            X, Y = torch.meshgrid(xs, ys, indexing='xy')
+
+        X_flat = torch.flatten(X)
+        Y_flat = torch.flatten(Y)
+        if self.dim == 3:
+            Z_flat = torch.flatten(Z)
+            stacked_tensors = torch.stack((X_flat, Y_flat, Z_flat), dim=-1).view(-1, 1, self.dim)
+        else:
+            stacked_tensors = torch.stack((X_flat, Y_flat), dim=-1).view(-1, 1, self.dim)
+
+        sdf = self.compute_sdf(stacked_tensors, reshape_shape=X.shape)
+
+        obstacle_mask = sdf < 0
+
+        return obstacle_mask
 
 
 if __name__ == '__main__':
