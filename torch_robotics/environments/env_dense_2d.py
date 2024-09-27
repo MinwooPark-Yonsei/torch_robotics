@@ -1,10 +1,11 @@
 import numpy as np
 import torch
 from matplotlib import pyplot as plt
+from matplotlib.colors import to_rgb
 import time
 
 from torch_robotics.environments.env_base import EnvBase
-from torch_robotics.environments.primitives import ObjectField, MultiSphereField, MultiBoxField, MultiHollowBoxField
+from torch_robotics.environments.primitives import ObjectField, MultiSphereField, MultiBoxField, MultiTriangleField, MultiHollowBoxField
 from torch_robotics.environments.utils import create_grid_spheres
 from torch_robotics.robots import RobotPointMass
 from torch_robotics.torch_utils.torch_utils import DEFAULT_TENSOR_ARGS
@@ -21,39 +22,64 @@ class EnvDense2D(EnvBase):
                  seed=None,
                  circle_num=10,
                  box_num=10,
+                 triangle_num=0,
                  hollow_box_num=0,
                  addtional_circles=None,
                  additional_boxes=None,
+                 additional_triangles=None,
                  additional_hollow_boxes=None,
+                 color='gray',
                  **kwargs
                  ):
         
         if seed is None:
             seed = int(np.random.rand() * 2**32 - 1)
         np.random.seed(seed)        
-        print("seed:", seed)
+        # print("seed:", seed)
 
         circle_loc = np.random.uniform(-1, 1, (circle_num, 2))
         circle_r = np.array([0.125] * circle_num)
         box_loc = np.random.uniform(-1, 1, (box_num, 2))
         box_wh = np.array([[0.2, 0.2]] * box_num)
+        triangle_loc = np.random.uniform(-1, 1, (triangle_num, 2))
+        triangle_len = np.array([[0.2]] * triangle_num)
         hollow_box_loc = np.random.uniform(-1, 1, (hollow_box_num, 2))
         hollow_box_wh = np.array([[0.5, 0.5]] * hollow_box_num)
         wall_thickness = np.array([[0.1, 0.1]])
 
         if addtional_circles:
-            circle_loc = np.concatenate((circle_loc, addtional_circles[0]))
-            circle_r = np.concatenate((circle_r, addtional_circles[1]))
+            if circle_num == 0:
+                circle_loc = addtional_circles[0]
+                circle_r = addtional_circles[1]
+            else:
+                circle_loc = np.concatenate((circle_loc, addtional_circles[0]))
+                circle_r = np.concatenate((circle_r, addtional_circles[1]))
         if additional_boxes:
-            box_loc = np.concatenate((box_loc, additional_boxes[0]))
-            box_wh = np.concatenate((box_wh, additional_boxes[1]))
+            if box_num == 0:
+                box_loc = additional_boxes[0]
+                box_wh = additional_boxes[1]
+            else:
+                box_loc = np.concatenate((box_loc, additional_boxes[0]))
+                box_wh = np.concatenate((box_wh, additional_boxes[1]))
+        if additional_triangles:
+            if triangle_num == 0:
+                triangle_loc = additional_triangles[0]
+                triangle_len = additional_triangles[1]
+            else:
+                triangle_loc = np.concatenate((triangle_loc, additional_triangles[0]))
+                triangle_len = np.concatenate((triangle_len, additional_triangles[1]))
         if additional_hollow_boxes:
-            hollow_box_loc = np.concatenate((hollow_box_loc, additional_hollow_boxes[0]))
-            hollow_box_wh = np.concatenate((hollow_box_wh, additional_hollow_boxes[1]))
+            if hollow_box_num == 0:
+                hollow_box_loc = additional_hollow_boxes[0]
+                hollow_box_wh = additional_hollow_boxes[1]
+            else:
+                hollow_box_loc = np.concatenate((hollow_box_loc, additional_hollow_boxes[0]))
+                hollow_box_wh = np.concatenate((hollow_box_wh, additional_hollow_boxes[1]))
         
-        print("circle pos:\n", circle_loc)
-        print("box pos:\n", box_loc)
-        print("hollow box pos:\n", hollow_box_loc)
+        # print("circle pos:\n", circle_loc)
+        # print("box pos:\n", box_loc)
+        # print("triangle pos:\n", triangle_loc)
+        # print("hollow box pos:\n", hollow_box_loc)
 
         obj_list = []
         if circle_num or addtional_circles:
@@ -72,6 +98,14 @@ class EnvDense2D(EnvBase):
                     tensor_args=tensor_args
                 )
             )
+        if triangle_num or additional_triangles:
+            obj_list.append(
+                MultiTriangleField(
+                    triangle_loc,
+                    triangle_len,
+                    tensor_args=tensor_args
+                )
+            )
         if hollow_box_num or additional_hollow_boxes:
             obj_list.append(
                 MultiHollowBoxField(
@@ -84,7 +118,10 @@ class EnvDense2D(EnvBase):
             
         self.circle_loc = circle_loc
         self.box_loc = box_loc
+        self.triangle_loc = triangle_loc
         self.hollow_box_loc = hollow_box_loc
+
+        self.color = color
 
         super().__init__(
             name=name,
@@ -158,7 +195,7 @@ class EnvDense2D(EnvBase):
         else:
             raise NotImplementedError
         
-    def extract_env_as_array(self, current_state:np.ndarray, goal_state:np.ndarray, grid_size=(64, 64), marker_size=3):
+    def extract_env_as_array(self, current_state:np.ndarray, goal_state:np.ndarray, grid_size=(64, 64), marker_size=1):
         x_vals = np.linspace(self.limits_np[0][0], self.limits_np[1][0], grid_size[0])
         y_vals = np.linspace(self.limits_np[1][1], self.limits_np[0][1], grid_size[1])
         
@@ -168,8 +205,9 @@ class EnvDense2D(EnvBase):
         grid_points_tensor = torch.tensor(grid_points, **self.tensor_args)
         sdf_values = self.compute_sdf(grid_points_tensor).cpu().numpy().reshape(grid_size)
         
-        img = np.ones((*grid_size, 3))
-        img[sdf_values < 0] = [0.5, 0.5, 0.5]
+        img = np.ones((*grid_size, 3)) # white for background
+        obstacle_rgb = to_rgb(self.color)
+        img[sdf_values < 0] = obstacle_rgb
         
         current_idx = np.round(((current_state - self.limits_np[0]) / (self.limits_np[1] - self.limits_np[0])) * (np.array(grid_size) - 1)).astype(int)
         goal_idx = np.round(((goal_state - self.limits_np[0]) / (self.limits_np[1] - self.limits_np[0])) * (np.array(grid_size) - 1)).astype(int)
@@ -188,7 +226,19 @@ class EnvDense2D(EnvBase):
             image[y_min:y_max, x_min:x_max] = color
         
         fill_marker(img, current_idx, [0, 0, 1], marker_size)
-        fill_marker(img, goal_idx, [1, 0, 0], marker_size)
+        # fill_marker(img, goal_idx, [1, 0, 0], marker_size)
+
+        # Handle multiple goals
+        if goal_state.ndim == 1:  # Single goal state
+            goal_states = [goal_state]
+        else:  # Multiple goal states
+            goal_states = goal_state
+
+        for goal in goal_states:
+            goal_idx = np.round(((goal - self.limits_np[0]) / (self.limits_np[1] - self.limits_np[0])) * (np.array(grid_size) - 1)).astype(int)
+            goal_idx[1] = grid_size[1] - 1 - goal_idx[1]
+            goal_idx = np.clip(goal_idx, 0, np.array(grid_size) - 1)
+            fill_marker(img, goal_idx, [1, 0, 0], marker_size)
         
         return img
     

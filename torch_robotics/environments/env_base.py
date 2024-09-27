@@ -119,10 +119,10 @@ class EnvBase(ABC):
             except:
                 raise NotImplementedError
 
-    def render(self, ax=None):
+    def render(self, ax=None, color='gray'):
         if self.obj_fixed_list is not None:
             for obj in self.obj_fixed_list:
-                obj.render(ax)
+                obj.render(ax, color=color)
 
         if self.obj_extra_list is not None:
             for obj in self.obj_extra_list:

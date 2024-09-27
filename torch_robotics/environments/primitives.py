@@ -7,7 +7,7 @@ import einops
 import numpy as np
 import torch
 from matplotlib import pyplot as plt, transforms
-from matplotlib.patches import FancyBboxPatch, BoxStyle
+from matplotlib.patches import FancyBboxPatch, BoxStyle, Polygon
 from torch.autograd.functional import jacobian
 
 from torch_robotics.torch_kinematics_tree.geometrics.quaternion import q_to_rotation_matrix
@@ -341,6 +341,153 @@ class MultiRoundedBoxField(MultiBoxField):
 # This creates smoother cost functions, which are important to gradient-based optimization methods.
 MultiBoxField = MultiRoundedBoxField
 
+class MultiTriangleField(PrimitiveShapeField):
+    def __init__(self, centers, lengths, tensor_args=None):
+        """
+        Parameters
+        ----------
+            centers : numpy array
+                Center positions of the triangles. Shape should be (n_triangles, 2).
+            lengths : numpy array
+                Lengths of the legs of the triangles. Shape should be (n_triangles, 1).
+        """
+        super().__init__(dim=centers.shape[-1], tensor_args=tensor_args)
+        self.centers = to_torch(centers, **self.tensor_args)
+        self.lengths = to_torch(lengths, **self.tensor_args)
+        self.vertices = self.compute_vertices()
+
+    def compute_vertices(self):
+        """
+        Compute the vertices of each right triangle given the centers and lengths of the legs.
+        The vertices are computed assuming the right angle is at the origin and the triangle is aligned with the x and y axes.
+        """
+        # Compute half lengths for easier vertex calculation
+        half_lengths = self.lengths / 2
+
+        # Calculate the three vertices for each triangle
+        v0 = torch.stack([self.centers[:, 0] - half_lengths[:, 0], self.centers[:, 1] - np.sqrt(3) / 3 * half_lengths[:, 0]], dim=-1)
+        v1 = torch.stack([self.centers[:, 0] + half_lengths[:, 0], self.centers[:, 1] - np.sqrt(3) / 3 * half_lengths[:, 0]], dim=-1)
+        v2 = torch.stack([self.centers[:, 0], self.centers[:, 1] + 2 * np.sqrt(3) / 3 * half_lengths[:, 0]], dim=-1)
+
+        # Stack vertices together into a tensor of shape (n_triangles, 3, 2)
+        vertices = torch.stack([v0, v1, v2], dim=1)
+        return vertices
+
+    def compute_signed_distance_impl(self, x):
+        """
+        Compute the signed distance from each point in x to the closest triangle in the field.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            A tensor of shape (batch_size, 1, 2) or (batch_size, 2) where each row represents a 2D point (x, y).
+
+        Returns
+        -------
+        torch.Tensor
+            A tensor of shape (batch_size, 1) or (batch_size) containing the signed distance for each point.
+        """
+
+        # Check the input shape and set a flag to determine if we need to unsqueeze the output
+        unsqueeze_output = False
+        if x.dim() == 2 and x.shape[1] == 2:
+            x = x.unsqueeze(1)  # Change shape from [batch_size, 2] to [batch_size, 1, 2]
+            unsqueeze_output = True  # We'll need to squeeze the output back to [batch_size]
+
+        def is_point_in_triangle(x, v0, v1, v2):
+            def sign(p1, p2, p3):
+                return (p1[:, 0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[:, 1] - p3[1])
+
+            d1 = sign(x, v0, v1)
+            d2 = sign(x, v1, v2)
+            d3 = sign(x, v2, v0)
+
+            has_neg = (d1 < 0) | (d2 < 0) | (d3 < 0)
+            has_pos = (d1 > 0) | (d2 > 0) | (d3 > 0)
+
+            return ~(has_neg & has_pos)
+
+        def point_to_segment_distance(x, p1, p2):
+            segment_vec = p2 - p1
+            point_vec = x - p1
+            segment_len_sq = torch.sum(segment_vec ** 2)
+
+            t = torch.sum(point_vec * segment_vec, dim=1) / segment_len_sq
+            t = torch.clamp(t, 0, 1)
+            projection = p1 + t[:, None] * segment_vec
+
+            return torch.norm(x - projection, dim=1)
+
+        sdf_list = []
+
+        for triangle in self.vertices:
+            v0, v1, v2 = triangle
+            v0 = torch.tensor(v0, **self.tensor_args)
+            v1 = torch.tensor(v1, **self.tensor_args)
+            v2 = torch.tensor(v2, **self.tensor_args)
+
+            inside = is_point_in_triangle(x.squeeze(-2), v0, v1, v2)
+            dist_v0_v1 = point_to_segment_distance(x.squeeze(-2), v0, v1)
+            dist_v1_v2 = point_to_segment_distance(x.squeeze(-2), v1, v2)
+            dist_v2_v0 = point_to_segment_distance(x.squeeze(-2), v2, v0)
+
+            dist_to_edges = torch.stack([dist_v0_v1, dist_v1_v2, dist_v2_v0], dim=-1)
+            signed_distances = torch.where(inside, -torch.min(dist_to_edges, dim=-1)[0], torch.min(dist_to_edges, dim=-1)[0])
+
+            sdf_list.append(signed_distances)
+
+        sdf_list = torch.stack(sdf_list, dim=-1)
+        final_sdf = torch.min(sdf_list, dim=-1)[0]
+
+        # Adjust output shape based on the original input shape
+        if unsqueeze_output:
+            return final_sdf  # Return shape [batch_size]
+        else:
+            return final_sdf.unsqueeze(-1)  # Return shape [batch_size, 1]
+
+    def add_to_occupancy_map(self, obst_map):
+        """
+        Adds triangles to the occupancy map.
+        """
+        for triangle in self.vertices:
+            v0, v1, v2 = to_numpy(triangle)
+            polygon = Polygon([v0, v1, v2], closed=True)
+            # Add the polygon to the occupancy map (implementation needed based on specific occupancy map structure)
+            pass
+
+    def render(self, ax, pos=None, ori=None, color='gray', **kwargs):
+        """
+        Render the triangles in the given axis.
+        """
+        if pos is None:
+            pos = self.pos
+        if ori is None:
+            ori = self.ori
+
+        rot = q_to_rotation_matrix(ori).squeeze()
+
+        for triangle in self.vertices:
+            v0, v1, v2 = to_numpy(triangle)
+            
+            # Convert vertices to tensors and add a z-dimension (set to 0) for compatibility
+            v0 = torch.tensor([v0[0], v0[1], 0.0], **self.tensor_args)
+            v1 = torch.tensor([v1[0], v1[1], 0.0], **self.tensor_args)
+            v2 = torch.tensor([v2[0], v2[1], 0.0], **self.tensor_args)
+            
+            # Apply position and rotation
+            v0 = transform_point(v0, rot, pos)
+            v1 = transform_point(v1, rot, pos)
+            v2 = transform_point(v2, rot, pos)
+
+            # Convert back to 2D by discarding the z-coordinate
+            v0 = to_numpy(v0[:2])
+            v1 = to_numpy(v1[:2])
+            v2 = to_numpy(v2[:2])
+
+            polygon = Polygon([v0, v1, v2], closed=True, color=color)
+            ax.add_patch(polygon)
+
+
 class MultiHollowBoxField(PrimitiveShapeField):
 
     def __init__(self, centers, sizes, wall_thickness, tensor_args=None):
@@ -492,9 +639,6 @@ class MultiHollowBoxField(PrimitiveShapeField):
                               color=color, linewidth=0, alpha=1)
         patch_rotate_translate(ax, rectangle, rot, trans)
         ax.add_patch(rectangle)
-
-import torch
-from matplotlib.patches import FancyBboxPatch, BoxStyle
 
 class MultiRoundedHollowBoxField(MultiHollowBoxField):
 
@@ -816,7 +960,11 @@ if __name__ == '__main__':
                                torch.ones(1, **tensor_args).view(1, -1) * 0.3,
                                tensor_args=tensor_args)
 
-    boxes = MultiBoxField(torch.zeros(2, **tensor_args).view(1, -1) + 0.5,
+    # boxes = MultiBoxField(torch.zeros(2, **tensor_args).view(1, -1) + 0.5,
+                        #   torch.ones(2, **tensor_args).view(1, -1) * 0.3,
+                        #   tensor_args=tensor_args)
+    
+    triangles = MultiTriangleField(torch.zeros(2, **tensor_args).view(1, -1) + 0.5,
                           torch.ones(2, **tensor_args).view(1, -1) * 0.3,
                           tensor_args=tensor_args)
     
@@ -825,7 +973,7 @@ if __name__ == '__main__':
                           wall_thickness = torch.tensor([[0.1, 0.1]], **tensor_args),
                           tensor_args=tensor_args)
 
-    obj_field = ObjectField([spheres, boxes, hollow_boxes])
+    obj_field = ObjectField([spheres, triangles, hollow_boxes])
 
     theta = np.deg2rad(45)
     # obj_field.set_position_orientation(pos=[-0.5, 0., 0.])
