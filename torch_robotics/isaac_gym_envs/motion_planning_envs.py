@@ -15,7 +15,7 @@ from isaacgym.torch_utils import *
 
 import torch
 
-from deps.isaacgym.python.isaacgym.torch_utils import to_torch
+from isaacgym.torch_utils import to_torch
 from torch_robotics.environments import EnvTableShelf
 from torch_robotics.environments.env_spheres_3d import EnvSpheres3D
 from torch_robotics.environments.primitives import MultiSphereField, MultiBoxField
