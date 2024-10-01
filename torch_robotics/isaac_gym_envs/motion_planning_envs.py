@@ -561,8 +561,13 @@ class PandaMotionPlanningIsaacGymEnv:
             rigid_contacts = self.gym.get_env_rigid_contacts(env)
             if self.all_robots_in_one_env:
                 for contact in rigid_contacts:
-                    body1_idx = contact[2]
-                    env_idx = self.map_rigid_body_idxs_to_env_idx[body1_idx]
+                    # body1_idx = contact[2]
+                    # env_idx = self.map_rigid_body_idxs_to_env_idx[body1_idx]
+                    assert contact['env0'] == contact['env1']
+                    env_idx = contact['env0']
+                    # body0_idx = contact['body0']
+                    # body1_idx = contact['body1']
+                    # print(f'{self.gym.get_rigid_name(env, body0_idx)} collided with {self.gym.get_rigid_name(env, body1_idx)} in env {env_idx}')
                     if env_idx in envs_with_robot_in_contact:
                         pass
                     else:
