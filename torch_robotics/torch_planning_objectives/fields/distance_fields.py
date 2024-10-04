@@ -90,8 +90,8 @@ class EmbodimentDistanceFieldBase(DistanceField):
                  num_interpolated_points=30,
                  collision_margins=0.,
                  cutoff_margin=0.001,
-                 field_type='sdf', clamp_sdf=False,
-                 interpolate_link_pos=False,
+                 field_type='sdf', clamp_sdf=True,
+                 interpolate_link_pos=True,
                  **kwargs):
         super().__init__(**kwargs)
         assert robot is not None, "You need to pass a robot instance to the embodiment distance fields"
@@ -112,7 +112,7 @@ class EmbodimentDistanceFieldBase(DistanceField):
         elif field_type == 'sdf':  # this computes the negative cost from the DISTANCE FUNCTION
             margin = self.collision_margins + self.cutoff_margin
             # returns all distances from each link to the environment
-            link_pos = link_pos[..., self.link_idxs_for_collision_checking, :]
+            # link_pos = link_pos[..., self.link_idxs_for_collision_checking, :]
             margin_minus_sdf = -(self.compute_embodiment_signed_distances(q, link_pos, **kwargs) - margin)
             if self.clamp_sdf:
                 clamped_sdf = torch.relu(margin_minus_sdf)
@@ -236,7 +236,7 @@ class CollisionSelfField(EmbodimentDistanceFieldBase):
 
     def compute_embodiment_collision(self, q, link_pos, **kwargs):  # position tensor
         margin = kwargs.get('margin', self.cutoff_margin)
-        link_pos = link_pos[..., self.link_idxs_for_collision_checking, :]
+        # link_pos = link_pos[..., self.link_idxs_for_collision_checking, :]
         distances = self.compute_embodiment_signed_distances(q, link_pos, **kwargs)
         any_self_collision = torch.any(distances < margin, dim=-1)
         return any_self_collision
@@ -310,7 +310,7 @@ class CollisionObjectBase(EmbodimentDistanceFieldBase):
     def compute_embodiment_collision(self, q, link_pos, **kwargs):
         # position tensor
         margin = kwargs.get('margin', self.collision_margins + self.cutoff_margin)
-        link_pos = link_pos[..., self.link_idxs_for_collision_checking, :]
+        # link_pos = link_pos[..., self.link_idxs_for_collision_checking, :]
         signed_distances = self.object_signed_distances(link_pos, **kwargs)
         collisions = signed_distances < margin
         # reduce over points (dim -1) and over objects (dim -2)
