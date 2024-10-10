@@ -332,6 +332,7 @@ class PandaMotionPlanningIsaacGymEnv:
         # robots pose
         franka_pose = gymapi.Transform()
         franka_pose.p = gymapi.Vec3(0, 0, 0)
+        franka_pose.r = gymapi.Quat(0, 0, np.sqrt(2) / 2, np.sqrt(2) / 2)
 
         self.envs = []
         self.franka_handles = []
