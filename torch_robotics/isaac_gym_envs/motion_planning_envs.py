@@ -1,6 +1,9 @@
 import os
 import time
+import open3d as o3d
 from math import ceil
+from PIL import Image as Im
+import matplotlib.pyplot as plt
 
 import cv2
 import imageio
@@ -26,14 +29,12 @@ from torch_robotics.torch_planning_objectives.fields.distance_fields import inte
 from torch_robotics.torch_utils.seed import fix_random_seed
 from torch_robotics.torch_utils.torch_utils import get_torch_device, to_numpy
 
-
 def set_position_and_orientation(center, obj_pos, obj_ori):
     # set position and orientation
     obj_pose = gymapi.Transform()
     obj_pose.p = gymapi.Vec3(*(center + obj_pos))
     obj_pose.r = gymapi.Quat(obj_ori[1], obj_ori[2], obj_ori[3], obj_ori[0])
     return obj_pose
-
 
 def create_assets_from_primitive_shapes(sim, gym, obj_list):
     object_assets_l = []
@@ -78,7 +79,6 @@ def create_assets_from_primitive_shapes(sim, gym, obj_list):
 
     return object_assets_l, object_poses_l
 
-
 def make_gif_from_array(filename, array, fps=10):
     # https://gist.github.com/nirum/d4224ad3cd0d71bfef6eba8f3d6ffd59
     """Creates a gif given a stack of images using moviepy
@@ -107,6 +107,41 @@ def make_gif_from_array(filename, array, fps=10):
     clip = ImageSequenceClip(list(array), fps=fps)
     clip.write_gif(filename, fps=fps)
     return clip
+
+@torch.jit.script
+def depth_image_to_point_cloud_GPU(camera_tensors, camera_view_matrix_inv, camera_proj_matrix, u, v, width: float,
+                                   height: float, depth_bar: float, device: torch.device):
+    # time1 = time.time()
+    depth_buffer = camera_tensors.to(device)
+
+    # Get the camera view matrix and invert it to transform points from camera to world space
+    vinv = camera_view_matrix_inv
+
+    # Get the camera projection matrix and get the necessary scaling
+    # coefficients for deprojection
+
+    proj = camera_proj_matrix
+    fu = 2 / proj[0, 0]
+    fv = 2 / proj[1, 1]
+
+    centerU = width / 2
+    centerV = height / 2
+
+    Z = depth_buffer
+    X = -(u - centerU) / width * Z * fu
+    Y = (v - centerV) / height * Z * fv
+
+    Z = Z.view(-1)
+    valid = Z > -depth_bar
+    X = X.view(-1)
+    Y = Y.view(-1)
+
+    position = torch.vstack((X, Y, Z, torch.ones_like(X, device=device)))[:, valid]
+    position = position.permute(1, 0)
+    position = position @ vinv
+    points = position[:, 0:3]
+
+    return points
 
 
 class ViewerRecorder:
@@ -173,6 +208,7 @@ class ViewerRecorder:
             gif_path = gif_path + '.gif'
             video.write_gif(gif_path, fps=video.fps)
 
+
 class PandaMotionPlanningIsaacGymEnv:
 
     def __init__(self, env, robot, task,
@@ -192,6 +228,8 @@ class PandaMotionPlanningIsaacGymEnv:
                  lower_level_controller_frequency=1000,
                  **kwargs,
     ):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         self.env = env
         self.robot = robot
         self.task = task
@@ -315,6 +353,31 @@ class PandaMotionPlanningIsaacGymEnv:
         self.default_dof_state = np.zeros(self.franka_num_dofs, gymapi.DofState.dtype)
         self.default_dof_state["pos"] = self.default_dof_pos
 
+        # camera properties
+        self.camera_props = gymapi.CameraProperties()
+        self.camera_props.width = 1280
+        self.camera_props.height = 720
+        self.camera_props.enable_tensors = True
+        self.default_cam_pos = gymapi.Vec3(0, 2.25, 1)
+        self.default_cam_stare = gymapi.Vec3(0, -3, -1.25)
+
+        # for 3d point cloud
+        self.env_origin = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float)
+        self.pointCloudDownsampleNum = 768 * 9
+        self.camera_u = torch.arange(0, self.camera_props.width, device=self.device)
+        self.camera_v = torch.arange(0, self.camera_props.height, device=self.device)
+
+        self.camera_v2, self.camera_u2 = torch.meshgrid(self.camera_v, self.camera_u, indexing='ij')
+
+        if True:
+            import open3d as o3d
+            from torch_robotics.utils.o3dviewer import PointcloudVisualizer
+            self.pointCloudVisualizer = PointcloudVisualizer()
+            self.pointCloudVisualizerInitialized = False
+            self.o3d_pc = o3d.geometry.PointCloud()
+        else :
+            self.pointCloudVisualizer = None    
+
         ###############################################################################################################
         # Create environments
         num_per_row = int(np.sqrt(self.num_envs))
@@ -338,6 +401,11 @@ class PandaMotionPlanningIsaacGymEnv:
         self.franka_handles = []
         self.obj_idxs = []
         self.hand_idxs = []
+
+        self.cameras = []
+        self.camera_tensors = []
+        self.camera_view_matrixs = []
+        self.camera_proj_matrixs = []
 
         color_obj_fixed = gymapi.Vec3(220. / 255., 220. / 255., 220. / 255.)
         color_obj_extra = gymapi.Vec3(1., 0., 0.)
@@ -405,30 +473,105 @@ class PandaMotionPlanningIsaacGymEnv:
             # set dof properties
             self.gym.set_actor_dof_properties(env, franka_handle, franka_dof_props)
 
-        ###############################################################################################################
-        # CAMERA
-        # point camera at middle env
-        # cam_pos = gymapi.Vec3(1.75, 0, 1.25)
-        # cam_target = gymapi.Vec3(-3, 0, -1.25)
-        # cam_pos = gymapi.Vec3(0, 1.75, 1.25)
-        # cam_target = gymapi.Vec3(0, -3, -1.25)
-        cam_pos = gymapi.Vec3(0, 2.25, 1)
-        cam_target = gymapi.Vec3(0, -3, -1.25)
-        if len(self.envs) == 1:
-            self.middle_env = self.envs[0]
-        else:
-            self.middle_env = self.envs[self.num_envs // 2 + num_per_row // 2]
-        self.gym.viewer_camera_look_at(self.viewer, self.middle_env, cam_pos, cam_target)
+            # create camera
+            camera_handle = self.gym.create_camera_sensor(env, self.camera_props)
+            self.gym.set_camera_location(camera_handle, env, franka_pose.p, franka_pose.p + gymapi.Vec3(-0.1, 0, 0))
 
-        camera_props = gymapi.CameraProperties()
+            local_transform = gymapi.Transform()
+            local_transform.p = gymapi.Vec3(0.05, 0, 0.04)
+            local_transform.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 1, 0), np.radians(-100.0))
+            self.gym.attach_camera_to_body(camera_handle, env,
+                                self.gym.find_actor_rigid_body_handle(env, franka_handle, "panda_hand"),
+                                local_transform, gymapi.FOLLOW_TRANSFORM)
+
+            camera_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env, camera_handle, gymapi.IMAGE_DEPTH)
+            torch_cam_tensor = gymtorch.wrap_tensor(camera_tensor)
+            cam_vinv = torch.inverse((torch.tensor(self.gym.get_camera_view_matrix(self.sim, env, camera_handle)))).to(self.device)
+            cam_proj = torch.tensor(self.gym.get_camera_proj_matrix(self.sim, env, camera_handle), device=self.device)
+
+            self.camera_tensors.append(torch_cam_tensor)
+            self.camera_view_matrixs.append(cam_vinv)
+            self.camera_proj_matrixs.append(cam_proj)
+            self.cameras.append(camera_handle)
+
+        ###############################################################################################################
+        # CAMERA1
+        # point camera at middle env
+        middle_cam_pos = gymapi.Vec3(0, 2.25, 1)
+        middle_cam_target = gymapi.Vec3(0, -3, -1.25)
+        if len(self.envs) == 1:
+            self.middle_cam_env = self.envs[0]
+        else:
+            self.middle_cam_env = self.envs[self.num_envs // 2 + num_per_row // 2]
+        self.gym.viewer_camera_look_at(self.viewer, self.middle_cam_env, middle_cam_pos, middle_cam_target)
+
+        middle_camera_props = gymapi.CameraProperties()
         # camera_props.width = 1920
         # camera_props.height = 1080
-        camera_props.width = 1280
-        camera_props.height = 720
-        self.viewer_camera_handle = self.gym.create_camera_sensor(self.middle_env, camera_props)
-        self.gym.set_camera_location(self.viewer_camera_handle, env, cam_pos, cam_target)
+        middle_camera_props.width = 1280
+        middle_camera_props.height = 720
+        middle_camera_props.enable_tensors = True
+        self.viewer_middle_camera_handle = self.gym.create_camera_sensor(self.middle_cam_env, middle_camera_props)
+        self.gym.set_camera_location(self.viewer_middle_camera_handle, env, middle_cam_pos, middle_cam_target)
 
         self.viewer_recorder = ViewerRecorder(dt=sim_params.dt, fps=ceil(1 / sim_params.dt))
+
+        ###############################################################################################################
+        # # CAMERA2
+        # # point camera at top env
+        # cam_pos = gymapi.Vec3(0, 0.7, 2)
+        # cam_target = gymapi.Vec3(0, -5, -50)
+        # if len(self.envs) == 1:
+        #     self.top_env = self.envs[0]
+        # else:
+        #     self.top_env = self.envs[self.num_envs // 2 + num_per_row // 2]
+        # self.gym.viewer_camera_look_at(self.viewer, self.top_env, cam_pos, cam_target)
+
+        # camera_props = gymapi.CameraProperties()
+        # # camera_props.width = 1920
+        # # camera_props.height = 1080
+        # camera_props.width = 1280
+        # camera_props.height = 720
+        # camera_props.enable_tensors = True
+        # self.viewer_camera_handle = self.gym.create_camera_sensor(self.top_env, camera_props)
+        # self.gym.set_camera_location(self.viewer_camera_handle, env, cam_pos, cam_target)
+
+        # cam_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, self.middle_env, self.viewer_camera_handle, gymapi.IMAGE_DEPTH)
+        # torch_cam_tensor = gymtorch.wrap_tensor(cam_tensor)
+
+        # self.viewer_recorder = ViewerRecorder(dt=sim_params.dt, fps=ceil(1 / sim_params.dt))
+
+        ###############################################################################################################
+        # # CAMERA3
+        # # point camera at franka panda
+        # cam_pos = gymapi.Vec3(0, 2.25, 1)
+        # cam_target = gymapi.Vec3(0, -3, -1.25)
+        # if len(self.envs) == 1:
+        #     self.middle_env = self.envs[0]
+        # else:
+        #     self.middle_env = self.envs[self.num_envs // 2 + num_per_row // 2]
+        # self.gym.viewer_camera_look_at(self.viewer, self.middle_env, cam_pos, cam_target)
+
+        # camera_props = gymapi.CameraProperties()
+        # # camera_props.width = 1920
+        # # camera_props.height = 1080
+        # camera_props.width = 1280
+        # camera_props.height = 720
+        # camera_props.enable_tensors = True
+        # self.viewer_camera_handle = self.gym.create_camera_sensor(self.middle_env, camera_props)
+        # self.gym.set_camera_location(self.viewer_camera_handle, self.middle_env, franka_pose.p, franka_pose.p + gymapi.Vec3(-0.1, 0, 0))
+
+        # # Attach camera to franka
+        # local_transform = gymapi.Transform()
+        # local_transform.p = gymapi.Vec3(0.05, 0, 0.04)
+        # local_transform.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 1, 0), np.radians(-100.0))
+        # self.gym.attach_camera_to_body(self.viewer_camera_handle, self.middle_env,
+        #                        self.gym.find_actor_rigid_body_handle(self.middle_env, self.franka_handles[1], "panda_hand"),
+        #                        local_transform, gymapi.FOLLOW_TRANSFORM)
+        # cam_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, self.middle_env, self.viewer_camera_handle, gymapi.IMAGE_DEPTH)
+        # torch_cam_tensor = gymtorch.wrap_tensor(cam_tensor)
+
+        # self.viewer_recorder = ViewerRecorder(dt=sim_params.dt, fps=ceil(1 / sim_params.dt))
 
         ###############################################################################################################
         # DEBUGGING visualization
@@ -512,7 +655,7 @@ class PandaMotionPlanningIsaacGymEnv:
             joint_states_curr = joint_states_curr[:-1, ...]
         return joint_states_curr
 
-    def step(self, actions, visualize=True, render_viewer_camera=False):
+    def step(self, actions, visualize=True, render_viewer_camera=True):
         ###############################################################################################################
         # step the physics
         self.gym.simulate(self.sim)
@@ -545,7 +688,7 @@ class PandaMotionPlanningIsaacGymEnv:
         elif self.controller_type == 'velocity':
             self.gym.set_dof_velocity_target_tensor(self.sim, gymtorch.unwrap_tensor(action_dof))
 
-        ###############################################################################################################
+        ###############################################################################################################      
         # Check collisions between robots and objects
         # TODO - implement vectorized version
         if self.all_robots_in_one_env:
@@ -639,9 +782,14 @@ class PandaMotionPlanningIsaacGymEnv:
             # render viewer camera
             if render_viewer_camera:
                 self.gym.render_all_camera_sensors(self.sim)
-                viewer_img = self.gym.get_camera_image(self.sim, self.middle_env, self.viewer_camera_handle, gymapi.IMAGE_COLOR)
+                # viewer_img = self.gym.get_camera_image(self.sim, self.middle_env, self.viewer_camera_handle, gymapi.IMAGE_COLOR)
+                viewer_img = self.gym.get_camera_image(self.sim, self.middle_cam_env, self.viewer_middle_camera_handle, gymapi.IMAGE_COLOR)
                 viewer_img = viewer_img.reshape(viewer_img.shape[0], -1, 4)[..., :3]  # get RGB part
                 self.viewer_recorder.append(self.step_idx, viewer_img)
+                self.gym.start_access_image_tensors(self.sim)
+
+        # Update full state, including point cloud
+        self.compute_full_state()
 
         self.step_idx += 1
 
@@ -650,6 +798,76 @@ class PandaMotionPlanningIsaacGymEnv:
         if self.show_goal_configuration:
             joint_states_curr = joint_states_curr[:-1, ...]
         return joint_states_curr, envs_with_robot_in_contact
+
+    def compute_full_state(self):
+        point_clouds = torch.zeros((self.num_envs, self.pointCloudDownsampleNum, 3), device=self.device)
+
+        self.camera_rgba_debug_fig = plt.figure("CAMERA_RGBD_DEBUG")
+        camera_rgba_image = self.camera_visualization(is_depth_image=False)
+        print(camera_rgba_image)
+        plt.imshow(camera_rgba_image)
+        plt.pause(1e-9)
+
+        for i in range(self.num_envs):
+            # Here is an example. In practice, it's better not to convert tensor from GPU to CPU
+            points = depth_image_to_point_cloud_GPU(self.camera_tensors[i], self.camera_view_matrixs[i], self.camera_proj_matrixs[i], self.camera_u2, self.camera_v2, self.camera_props.width, self.camera_props.height, 10, self.device)
+            if points.shape[0] > 0:
+                selected_points = self.sample_points(points, sample_num=self.pointCloudDownsampleNum, sample_mathed='random')
+            else:
+                selected_points = torch.zeros((self.num_envs, self.pointCloudDownsampleNum, 3), device=self.device)
+
+            # print(f"selected_points shape: {selected_points[0].shape}")
+            # print(f"point_clouds[i] shape: {point_clouds[i].shape}")
+
+            point_clouds[i] = selected_points[0]
+
+        if self.pointCloudVisualizer != None :
+            import open3d as o3d
+            points = point_clouds[0, :, :3].cpu().numpy()
+            # colors = plt.get_cmap()(point_clouds[0, :, 3].cpu().numpy())
+            self.o3d_pc.points = o3d.utility.Vector3dVector(points)
+            # self.o3d_pc.colors = o3d.utility.Vector3dVector(colors[..., :3])
+
+        if self.pointCloudVisualizerInitialized == False :
+            self.pointCloudVisualizer.add_geometry(self.o3d_pc)
+            self.pointCloudVisualizerInitialized = True
+        else :
+            self.pointCloudVisualizer.update(self.o3d_pc)
+
+        self.gym.end_access_image_tensors(self.sim)
+        point_clouds -= self.env_origin.view(self.num_envs, 1, 3)
+
+        point_clouds_flattened = point_clouds.view(self.num_envs, self.pointCloudDownsampleNum * 3)
+
+    def camera_visualization(self, is_depth_image=False):
+        if is_depth_image:
+            camera_depth_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, self.envs[0], self.cameras[1], gymapi.IMAGE_DEPTH)
+            torch_depth_tensor = gymtorch.wrap_tensor(camera_depth_tensor)
+            torch_depth_tensor = torch.clamp(torch_depth_tensor, -1, 1)
+            torch_depth_tensor = scale(torch_depth_tensor, to_torch([0], dtype=torch.float, device=self.device),
+                                                         to_torch([256], dtype=torch.float, device=self.device))
+            camera_image = torch_depth_tensor.cpu().numpy()
+            camera_image = Im.fromarray(camera_image)
+        
+        else:
+            camera_rgba_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, self.envs[0], self.cameras[1], gymapi.IMAGE_COLOR)
+            torch_rgba_tensor = gymtorch.wrap_tensor(camera_rgba_tensor)
+            camera_image = torch_rgba_tensor.cpu().numpy()
+            camera_image = Im.fromarray(camera_image)
+
+        return camera_image
+
+    def rand_row(self, tensor, dim_needed):  
+        row_total = tensor.shape[0]
+        return tensor[torch.randint(low=0, high=row_total, size=(dim_needed,)),:]
+
+    def sample_points(self, points, sample_num=1000, sample_mathed='furthest'):
+        eff_points = points[points[:, 2]>0.04]
+        if eff_points.shape[0] < sample_num :
+            eff_points = points
+        if sample_mathed == 'random':
+            sampled_points = self.rand_row(eff_points, sample_num)
+        return sampled_points
 
     def check_viewer_has_closed(self):
         return self.gym.query_viewer_has_closed(self.viewer)
@@ -672,7 +890,7 @@ class MotionPlanningController:
             n_first_steps=0,
             n_last_steps=0,
             visualize=True,
-            render_viewer_camera=False,
+            render_viewer_camera=True,
             make_video=False,
             video_path='./trajs_replay.mp4',
             make_gif=False
