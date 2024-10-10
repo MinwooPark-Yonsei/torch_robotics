@@ -226,6 +226,8 @@ class PandaMotionPlanningIsaacGymEnv:
                  show_contact_forces=False,
                  dt=1./25.,  # dt of motion planning
                  lower_level_controller_frequency=1000,
+                 visualize_pcds=False,
+                 image_view='topdown',  # 'topdown' or 'wrist'
                  **kwargs,
     ):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -242,6 +244,8 @@ class PandaMotionPlanningIsaacGymEnv:
         self.collor_robots_in_collision = collor_robots_in_collision
         self.show_collision_spheres = show_collision_spheres
         self.show_contact_forces = show_contact_forces
+
+        self.visualize_pcds = visualize_pcds
 
         # Modify the urdf to append the link of the grasped object
         if self.robot.grasped_object is not None:
@@ -355,8 +359,8 @@ class PandaMotionPlanningIsaacGymEnv:
 
         # camera properties
         self.camera_props = gymapi.CameraProperties()
-        self.camera_props.width = 1280
-        self.camera_props.height = 720
+        self.camera_props.width = 256
+        self.camera_props.height = 256
         self.camera_props.enable_tensors = True
         self.default_cam_pos = gymapi.Vec3(0, 2.25, 1)
         self.default_cam_stare = gymapi.Vec3(0, -3, -1.25)
@@ -369,13 +373,13 @@ class PandaMotionPlanningIsaacGymEnv:
 
         self.camera_v2, self.camera_u2 = torch.meshgrid(self.camera_v, self.camera_u, indexing='ij')
 
-        if True:
+        if visualize_pcds:
             import open3d as o3d
             from torch_robotics.utils.o3dviewer import PointcloudVisualizer
             self.pointCloudVisualizer = PointcloudVisualizer()
             self.pointCloudVisualizerInitialized = False
             self.o3d_pc = o3d.geometry.PointCloud()
-        else :
+        else:
             self.pointCloudVisualizer = None    
 
         ###############################################################################################################
@@ -473,17 +477,26 @@ class PandaMotionPlanningIsaacGymEnv:
             # set dof properties
             self.gym.set_actor_dof_properties(env, franka_handle, franka_dof_props)
 
-            # create camera
-            camera_handle = self.gym.create_camera_sensor(env, self.camera_props)
-            self.gym.set_camera_location(camera_handle, env, franka_pose.p, franka_pose.p + gymapi.Vec3(-0.1, 0, 0))
+            if image_view == 'wrist':
+                # create wrist camera
+                camera_handle = self.gym.create_camera_sensor(env, self.camera_props)
+                self.gym.set_camera_location(camera_handle, env, franka_pose.p, franka_pose.p + gymapi.Vec3(-0.1, 0, 0))
 
-            local_transform = gymapi.Transform()
-            local_transform.p = gymapi.Vec3(0.05, 0, 0.04)
-            local_transform.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 1, 0), np.radians(-100.0))
-            self.gym.attach_camera_to_body(camera_handle, env,
-                                self.gym.find_actor_rigid_body_handle(env, franka_handle, "panda_hand"),
-                                local_transform, gymapi.FOLLOW_TRANSFORM)
+                local_transform = gymapi.Transform()
+                local_transform.p = gymapi.Vec3(0.05, 0, 0.04)
+                local_transform.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 1, 0), np.radians(-100.0))
+                self.gym.attach_camera_to_body(camera_handle, env,
+                                    self.gym.find_actor_rigid_body_handle(env, franka_handle, "panda_hand"),
+                                    local_transform, gymapi.FOLLOW_TRANSFORM)
+                
+            elif image_view == 'topdown':
+                # create topdown camera
+                camera_handle = self.gym.create_camera_sensor(env, self.camera_props)
+                self.gym.set_camera_location(camera_handle, env, franka_pose.p + gymapi.Vec3(0, 0.5, 1.2), franka_pose.p + gymapi.Vec3(0, 0.49, 0))
 
+            else:
+                raise NotImplementedError
+            
             camera_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env, camera_handle, gymapi.IMAGE_DEPTH)
             torch_cam_tensor = gymtorch.wrap_tensor(camera_tensor)
             cam_vinv = torch.inverse((torch.tensor(self.gym.get_camera_view_matrix(self.sim, env, camera_handle)))).to(self.device)
@@ -512,7 +525,7 @@ class PandaMotionPlanningIsaacGymEnv:
         middle_camera_props.height = 720
         middle_camera_props.enable_tensors = True
         self.viewer_middle_camera_handle = self.gym.create_camera_sensor(self.middle_cam_env, middle_camera_props)
-        self.gym.set_camera_location(self.viewer_middle_camera_handle, env, middle_cam_pos, middle_cam_target)
+        self.gym.set_camera_location(self.viewer_middle_camera_handle, self.middle_cam_env, middle_cam_pos, middle_cam_target)
 
         self.viewer_recorder = ViewerRecorder(dt=sim_params.dt, fps=ceil(1 / sim_params.dt))
 
@@ -800,48 +813,48 @@ class PandaMotionPlanningIsaacGymEnv:
         return joint_states_curr, envs_with_robot_in_contact
 
     def compute_full_state(self):
-        point_clouds = torch.zeros((self.num_envs, self.pointCloudDownsampleNum, 3), device=self.device)
-
         self.camera_rgba_debug_fig = plt.figure("CAMERA_RGBD_DEBUG")
-        camera_rgba_image = self.camera_visualization(is_depth_image=False)
-        print(camera_rgba_image)
+        camera_rgba_image = self.camera_visualization(env=self.envs[0], camera=self.cameras[0], is_depth_image=False)
         plt.imshow(camera_rgba_image)
         plt.pause(1e-9)
 
-        for i in range(self.num_envs):
-            # Here is an example. In practice, it's better not to convert tensor from GPU to CPU
-            points = depth_image_to_point_cloud_GPU(self.camera_tensors[i], self.camera_view_matrixs[i], self.camera_proj_matrixs[i], self.camera_u2, self.camera_v2, self.camera_props.width, self.camera_props.height, 10, self.device)
-            if points.shape[0] > 0:
-                selected_points = self.sample_points(points, sample_num=self.pointCloudDownsampleNum, sample_mathed='random')
-            else:
-                selected_points = torch.zeros((self.num_envs, self.pointCloudDownsampleNum, 3), device=self.device)
+        if self.visualize_pcds:
+            point_clouds = torch.zeros((self.num_envs, self.pointCloudDownsampleNum, 3), device=self.device)
+            for i in range(self.num_envs):
+                # Here is an example. In practice, it's better not to convert tensor from GPU to CPU
+                points = depth_image_to_point_cloud_GPU(self.camera_tensors[i], self.camera_view_matrixs[i], self.camera_proj_matrixs[i], self.camera_u2, self.camera_v2, self.camera_props.width, self.camera_props.height, 10, self.device)
+                if points.shape[0] > 0:
+                    selected_points = self.sample_points(points, sample_num=self.pointCloudDownsampleNum, sample_mathed='random')
+                else:
+                    selected_points = torch.zeros((self.num_envs, self.pointCloudDownsampleNum, 3), device=self.device)
 
-            # print(f"selected_points shape: {selected_points[0].shape}")
-            # print(f"point_clouds[i] shape: {point_clouds[i].shape}")
+                # print(f"selected_points shape: {selected_points[0].shape}")
+                # print(f"point_clouds[i] shape: {point_clouds[i].shape}")
 
-            point_clouds[i] = selected_points[0]
+                point_clouds[i] = selected_points[0]
 
-        if self.pointCloudVisualizer != None :
-            import open3d as o3d
-            points = point_clouds[0, :, :3].cpu().numpy()
-            # colors = plt.get_cmap()(point_clouds[0, :, 3].cpu().numpy())
-            self.o3d_pc.points = o3d.utility.Vector3dVector(points)
-            # self.o3d_pc.colors = o3d.utility.Vector3dVector(colors[..., :3])
+            if self.pointCloudVisualizer != None :
+                import open3d as o3d
+                points = point_clouds[0, :, :3].cpu().numpy()
+                # colors = plt.get_cmap()(point_clouds[0, :, 3].cpu().numpy())
+                self.o3d_pc.points = o3d.utility.Vector3dVector(points)
+                # self.o3d_pc.colors = o3d.utility.Vector3dVector(colors[..., :3])
 
-        if self.pointCloudVisualizerInitialized == False :
-            self.pointCloudVisualizer.add_geometry(self.o3d_pc)
-            self.pointCloudVisualizerInitialized = True
-        else :
-            self.pointCloudVisualizer.update(self.o3d_pc)
+                if self.pointCloudVisualizerInitialized == False :
+                    self.pointCloudVisualizer.add_geometry(self.o3d_pc)
+                    self.pointCloudVisualizerInitialized = True
+                else :
+                    self.pointCloudVisualizer.update(self.o3d_pc)
+
+            point_clouds -= self.env_origin.view(self.num_envs, 1, 3)
+
+            point_clouds_flattened = point_clouds.view(self.num_envs, self.pointCloudDownsampleNum * 3)
 
         self.gym.end_access_image_tensors(self.sim)
-        point_clouds -= self.env_origin.view(self.num_envs, 1, 3)
 
-        point_clouds_flattened = point_clouds.view(self.num_envs, self.pointCloudDownsampleNum * 3)
-
-    def camera_visualization(self, is_depth_image=False):
+    def camera_visualization(self, env, camera, is_depth_image=False):
         if is_depth_image:
-            camera_depth_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, self.envs[0], self.cameras[1], gymapi.IMAGE_DEPTH)
+            camera_depth_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env, camera, gymapi.IMAGE_DEPTH)
             torch_depth_tensor = gymtorch.wrap_tensor(camera_depth_tensor)
             torch_depth_tensor = torch.clamp(torch_depth_tensor, -1, 1)
             torch_depth_tensor = scale(torch_depth_tensor, to_torch([0], dtype=torch.float, device=self.device),
@@ -850,7 +863,7 @@ class PandaMotionPlanningIsaacGymEnv:
             camera_image = Im.fromarray(camera_image)
         
         else:
-            camera_rgba_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, self.envs[0], self.cameras[1], gymapi.IMAGE_COLOR)
+            camera_rgba_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env, camera, gymapi.IMAGE_COLOR)
             torch_rgba_tensor = gymtorch.wrap_tensor(camera_rgba_tensor)
             camera_image = torch_rgba_tensor.cpu().numpy()
             camera_image = Im.fromarray(camera_image)
