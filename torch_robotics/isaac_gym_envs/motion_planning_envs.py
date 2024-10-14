@@ -472,12 +472,19 @@ class PandaMotionPlanningIsaacGymEnv:
 
             # add object to pick and place
             if pick_place:
+                # create box asset
+                box_size = 0.045
+                asset_options = gymapi.AssetOptions()
+                box_asset = self.gym.create_box(self.sim, box_size, box_size, box_size, asset_options)
+
+                # get proper object pose
                 pick_pos, pick_ori, place_pos, place_ori = self.env.get_pick_place_poses()
                 obj_pose = gymapi.Transform()
                 obj_pose.p = gymapi.Vec3(*pick_pos)
                 obj_pose.r = gymapi.Quat(pick_ori[1], pick_ori[2], pick_ori[3], pick_ori[0])
-                object_handle = self.gym.create_actor(env, obj_asset, obj_pose, "obj_pick_place", i, 0)
+                object_handle = self.gym.create_actor(env, box_asset, obj_pose, "obj_pick_place", i, 0)
                 self.gym.set_rigid_body_color(env, object_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, color_obj_pick)
+
                 # get global index of object in rigid body state tensor
                 obj_idx = self.gym.get_actor_rigid_body_index(env, object_handle, 0, gymapi.DOMAIN_SIM)
                 self.obj_pick_idxs.append(obj_idx)
