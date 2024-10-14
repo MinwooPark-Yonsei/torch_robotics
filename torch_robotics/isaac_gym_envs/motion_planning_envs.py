@@ -228,6 +228,7 @@ class PandaMotionPlanningIsaacGymEnv:
                  lower_level_controller_frequency=1000,
                  visualize_pcds=False,
                  image_view='topdown',  # 'topdown' or 'wrist'
+                 pick_place=False,
                  **kwargs,
     ):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -348,7 +349,8 @@ class PandaMotionPlanningIsaacGymEnv:
 
         # default dof states and position targets
         self.franka_num_dofs = self.gym.get_asset_dof_count(franka_asset)
-        self.default_dof_pos = np.zeros(self.franka_num_dofs, dtype=np.float32)
+        # self.default_dof_pos = np.zeros(self.franka_num_dofs, dtype=np.float32)
+        self.default_dof_pos = np.array([0, -np.pi/4, 0, -3 * np.pi/4, 0, np.pi/2, np.pi/4, 0.04, 0.04], dtype=np.float32)
         # default_dof_pos[:7] = franka_mids[:7]
 
         # grippers open
@@ -405,14 +407,21 @@ class PandaMotionPlanningIsaacGymEnv:
         self.franka_handles = []
         self.obj_idxs = []
         self.hand_idxs = []
+        self.obj_pick_idxs = []
 
         self.cameras = []
         self.camera_tensors = []
         self.camera_view_matrixs = []
         self.camera_proj_matrixs = []
 
-        color_obj_fixed = gymapi.Vec3(220. / 255., 220. / 255., 220. / 255.)
+        color_table = gymapi.Vec3(220. / 255., 220. / 255., 220. / 255.) # for the table, first obj of the fixed list
+        color_obj_fixed = gymapi.Vec3(128. / 255., 128. / 255., 128. / 255.)
         color_obj_extra = gymapi.Vec3(1., 0., 0.)
+        color_obj_pick = gymapi.Vec3(0., 0., 1.)
+
+        # pick and place objects
+        self.obj_pick_poses = []
+        self.obj_place_poses = []
 
         # create env
         if self.all_robots_in_one_env:
@@ -431,9 +440,20 @@ class PandaMotionPlanningIsaacGymEnv:
             if not self.all_robots_in_one_env:
                 env = self.gym.create_env(self.sim, env_lower, env_upper, num_per_row)
                 self.envs.append(env)
-
+            
+            # add the first obj
+            obj_asset = object_fixed_assets_l[0]
+            obj_pose = object_fixed_poses_l[0]
+            # for EnvTableObstacles, the first obj is the table
+            if type(env).__name__ == 'EnvTableObstacles':
+                object_handle = self.gym.create_actor(env, obj_asset, obj_pose, "table", i, 0)
+                self.gym.set_rigid_body_color(env, object_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, color_table)
+            else:
+                object_handle = self.gym.create_actor(env, obj_asset, obj_pose, "obj_fixed", i, 0)
+                self.gym.set_rigid_body_color(env, object_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, color_obj_fixed)
+                
             # add objects fixed
-            for obj_asset, obj_pose in zip(object_fixed_assets_l, object_fixed_poses_l):
+            for obj_asset, obj_pose in zip(object_fixed_assets_l[1:], object_fixed_poses_l[1:]):
                 object_handle = self.gym.create_actor(env, obj_asset, obj_pose, "obj_fixed", i, 0)
                 self.gym.set_rigid_body_color(env, object_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, color_obj_fixed)
                 # get global index of object in rigid body state tensor
@@ -449,6 +469,21 @@ class PandaMotionPlanningIsaacGymEnv:
                 obj_idx = self.gym.get_actor_rigid_body_index(env, object_handle, 0, gymapi.DOMAIN_SIM)
                 self.obj_idxs.append(obj_idx)
                 self.map_rigid_body_idxs_to_env_idx[obj_idx] = i
+
+            # add object to pick and place
+            if pick_place:
+                pick_pos, pick_ori, place_pos, place_ori = self.env.get_pick_place_poses()
+                obj_pose = gymapi.Transform()
+                obj_pose.p = gymapi.Vec3(*pick_pos)
+                obj_pose.r = gymapi.Quat(pick_ori[1], pick_ori[2], pick_ori[3], pick_ori[0])
+                object_handle = self.gym.create_actor(env, obj_asset, obj_pose, "obj_pick_place", i, 0)
+                self.gym.set_rigid_body_color(env, object_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, color_obj_pick)
+                # get global index of object in rigid body state tensor
+                obj_idx = self.gym.get_actor_rigid_body_index(env, object_handle, 0, gymapi.DOMAIN_SIM)
+                self.obj_pick_idxs.append(obj_idx)
+                self.map_rigid_body_idxs_to_env_idx[obj_idx] = i
+                self.obj_pick_poses.append(pick_pos + pick_ori)
+                self.obj_place_poses.append(place_pos + place_ori)
 
             # add franka
             # Set to 0 to enable self-collision. By default we do not consider self-collision because the collision
@@ -613,8 +648,21 @@ class PandaMotionPlanningIsaacGymEnv:
         self.step_idx = 0
 
         if start_joint_positions is None:
-            start_joint_positions = torch.zeros((self.num_envs, self.franka_num_dofs - 2), **self.tensor_args)  # w/o gripper
-            start_joint_positions[..., :7] = to_torch(self.default_dof_pos[:7], **self.tensor_args)
+            # start_joint_positions = torch.zeros((self.num_envs, self.franka_num_dofs - 2), **self.tensor_args)  # w/o gripper
+            # start_joint_positions[..., :7] = to_torch(self.default_dof_pos[:7], **self.tensor_args)
+            start_joint_positions = to_torch(self.default_dof_pos, **self.tensor_args)
+        else:
+            start_joint_positions.to(self.device)
+            shape = list(start_joint_positions.shape)
+            shape[-1] += 1
+            start_joint_positions_copy = torch.zeros(shape)
+            for i in range(len(start_joint_positions)):
+                if start_joint_positions[i][-1] <= 0.5:  # gripper open
+                    start_joint_positions_copy[i] = torch.cat((start_joint_positions[i][:-1], torch.tensor([0.04, 0.04], device=self.device)))
+                elif start_joint_positions[i][-1] > 0.5:  # gripper close
+                    start_joint_positions_copy[i] = torch.cat((start_joint_positions[i][:-1], torch.tensor([0.0225, 0.0225], device=self.device)))
+        
+        start_joint_positions = start_joint_positions_copy
 
         assert start_joint_positions.ndim == 2
 
@@ -627,15 +675,15 @@ class PandaMotionPlanningIsaacGymEnv:
 
         dof_pos_tensor = torch.zeros((self.num_envs, self.franka_num_dofs), **self.tensor_args)
         if self.show_goal_configuration:
-            dof_pos_tensor[:-1, :7] = start_joint_positions
+            dof_pos_tensor[:-1, :] = start_joint_positions
             assert goal_joint_position is not None
             self.goal_joint_position = goal_joint_position
-            dof_pos_tensor[-1, :7] = goal_joint_position
+            dof_pos_tensor[-1, :] = goal_joint_position
         else:
-            dof_pos_tensor[..., :7] = start_joint_positions
+            dof_pos_tensor = start_joint_positions
 
         # grippers open
-        dof_pos_tensor[..., 7:] = to_torch(self.franka_upper_limits, **self.tensor_args)[None, 7:]
+        # dof_pos_tensor[..., 7:] = to_torch(self.franka_upper_limits, **self.tensor_args)[None, 7:]
 
         # dof_state_tensor[..., :self.franka_num_dofs] = dof_pos_tensor
 
@@ -648,7 +696,7 @@ class PandaMotionPlanningIsaacGymEnv:
             joint_state_des = self.gym.get_actor_dof_states(env, handle, gymapi.STATE_ALL)
             joint_state_des['pos'] = np.zeros_like(joint_state_des['pos'])
             joint_state_des['vel'] = np.zeros_like(joint_state_des['vel'])
-            joint_state_des['pos'][:7] = to_numpy(joints_pos[:7])
+            joint_state_des['pos'] = to_numpy(joints_pos)
             joint_state_des['pos'][-1] = joints_pos[-1]
             joint_state_des['pos'][-2] = joints_pos[-2]
             self.gym.set_actor_dof_states(env, handle, joint_state_des, gymapi.STATE_ALL)
@@ -691,8 +739,12 @@ class PandaMotionPlanningIsaacGymEnv:
         else:
             action_dof[..., :7] = actions[..., :7]
 
-        # gripper is open
-        action_dof[..., 7:9] = torch.Tensor([[0.04, 0.04]] * self.num_envs)
+        for i in range(len(actions)):
+            # gripper state (0: open, 1: close)
+            if actions[i][7] <= 0.5:
+                action_dof[..., 7:9] = torch.tensor([[0.04, 0.04]] * self.num_envs)
+            elif actions[i][7] > 0.5:
+                action_dof[..., 7:9] = torch.tensor([[0.0225, 0.0225]] * self.num_envs)
 
         ###############################################################################################################
         # Deploy actions
@@ -856,7 +908,8 @@ class PandaMotionPlanningIsaacGymEnv:
         if is_depth_image:
             camera_depth_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env, camera, gymapi.IMAGE_DEPTH)
             torch_depth_tensor = gymtorch.wrap_tensor(camera_depth_tensor)
-            torch_depth_tensor = torch.clamp(torch_depth_tensor, -1, 1)
+            # torch_depth_tensor = torch.clamp(torch_depth_tensor, -1, 1)
+            torch_depth_tensor = torch.clamp(torch_depth_tensor, -2, 2) / 2
             torch_depth_tensor = scale(torch_depth_tensor, to_torch([0], dtype=torch.float, device=self.device),
                                                          to_torch([256], dtype=torch.float, device=self.device))
             camera_image = torch_depth_tensor.cpu().numpy()
