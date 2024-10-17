@@ -12,8 +12,8 @@ class PointcloudVisualizer():
     def update(self, cloud):
         # Update point cloud
         self.vis.update_geometry(cloud)
-        self.vis.update_renderer()
         self.vis.poll_events()
+        self.vis.update_renderer()
 
         # View control: adjust zoom, front, lookat, and up direction
         view_control = self.vis.get_view_control()
@@ -22,14 +22,23 @@ class PointcloudVisualizer():
         view_control.set_lookat([0.0, 0.0, 0.0])
         view_control.set_up([0.0, -1.0, 0.0])
 
+    def close(self):
+        self.vis.destroy_window()
 
-if __name__ == "__main__" :
-
-	visualizer = PointcloudVisualizer()
-	cloud = o3d.io.read_point_cloud("../../../assets/dataset/one_door_cabinet/46145_link_0/point_sample/full_PC.ply")
-	visualizer.add_geometry(cloud)
-	while True :
-		print("update")
-		visualizer.update(cloud)
-		xyz = np.asarray(cloud.points)
-		xyz *= 1.001
+if __name__ == "__main__":
+    visualizer = PointcloudVisualizer()
+    cloud = o3d.io.read_point_cloud("../../../assets/dataset/one_door_cabinet/46145_link_0/point_sample/full_PC.ply")
+    
+    # Adding the point cloud geometry
+    visualizer.add_geometry(cloud)
+    
+    try:
+        while True:
+            # Perform updates and refresh the visualization window
+            visualizer.update(cloud)
+            xyz = np.asarray(cloud.points)
+            xyz *= 1.001  # Example transformation for points update
+    except KeyboardInterrupt:
+        # Graceful shutdown when the user interrupts
+        print("Closing visualization")
+        visualizer.close()

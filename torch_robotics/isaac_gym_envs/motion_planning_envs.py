@@ -109,15 +109,17 @@ def make_gif_from_array(filename, array, fps=10):
     return clip
 
 @torch.jit.script
-def depth_image_to_point_cloud_GPU(camera_tensors, camera_view_matrix_inv, camera_proj_matrix, u, v, width: int,
-                                   height: int, depth_bar: int, device: torch.device):
+def depth_image_to_point_cloud_GPU(camera_tensors, camera_view_matrix_inv, camera_proj_matrix, camera_seg_tensors,
+                                   u, v, width: int, height: int, depth_bar: int, device: torch.device):
     points = []
 
     depth_buffer = camera_tensors.to(device)
+    seg_buffer = camera_seg_tensors.to(device)
+    depth_buffer[seg_buffer == 0] = -10001
 
     vinv = camera_view_matrix_inv
     proj = camera_proj_matrix
-    
+
     fu = 2/proj[0, 0]
     fv = 2/proj[1, 1]
 
@@ -126,6 +128,8 @@ def depth_image_to_point_cloud_GPU(camera_tensors, camera_view_matrix_inv, camer
     depth_bar = torch.tensor(depth_bar, device=device)
 
     depth_buffer = abs(depth_buffer)
+    seg_buffer = abs(seg_buffer)
+    object_id = 1  # segmentation Id
 
     centerU = width / 2
     centerV = height / 2
@@ -137,7 +141,8 @@ def depth_image_to_point_cloud_GPU(camera_tensors, camera_view_matrix_inv, camer
     Z = Z.view(-1)
     Z = torch.abs(Z)
 
-    valid = Z > -depth_bar
+    # valid = Z > -depth_bar
+    valid = (Z > -depth_bar) & (seg_buffer.view(-1) == object_id)
     X = X.view(-1)
     Y = Y.view(-1)
 
@@ -145,6 +150,15 @@ def depth_image_to_point_cloud_GPU(camera_tensors, camera_view_matrix_inv, camer
     position = position.permute(1, 0)
     position = position @ vinv
     points = position[:, 0:3]
+
+    # Rotate X
+    # points[:, 0] = -points[:, 0]
+
+    # Rotate Y
+    points[:, 1] = -points[:, 1]
+
+    # Rotate Z
+    # points[:, 2] = -points[:, 2]
 
     return points
 
@@ -417,6 +431,7 @@ class PandaMotionPlanningIsaacGymEnv:
         self.camera_tensors = []
         self.camera_view_matrixs = []
         self.camera_proj_matrixs = []
+        self.camera_seg_tensors = []
 
         color_table = gymapi.Vec3(220. / 255., 220. / 255., 220. / 255.) # for the table, first obj of the fixed list
         color_obj_fixed = gymapi.Vec3(128. / 255., 128. / 255., 128. / 255.)
@@ -458,7 +473,7 @@ class PandaMotionPlanningIsaacGymEnv:
                 
             # add objects fixed
             for obj_asset, obj_pose in zip(object_fixed_assets_l[1:], object_fixed_poses_l[1:]):
-                object_handle = self.gym.create_actor(env, obj_asset, obj_pose, "obj_fixed", i, 0)
+                object_handle = self.gym.create_actor(env, obj_asset, obj_pose, "obj_fixed", i, 0, 1)
                 self.gym.set_rigid_body_color(env, object_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, color_obj_fixed)
                 # get global index of object in rigid body state tensor
                 obj_idx = self.gym.get_actor_rigid_body_index(env, object_handle, 0, gymapi.DOMAIN_SIM)
@@ -467,7 +482,7 @@ class PandaMotionPlanningIsaacGymEnv:
 
             # add objects extra
             for obj_asset, obj_pose in zip(object_extra_assets_l, object_extra_poses_l):
-                object_handle = self.gym.create_actor(env, obj_asset, obj_pose, "obj_extra", i, 0)
+                object_handle = self.gym.create_actor(env, obj_asset, obj_pose, "obj_extra", i, 0, 1)
                 self.gym.set_rigid_body_color(env, object_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, color_obj_extra)
                 # get global index of object in rigid body state tensor
                 obj_idx = self.gym.get_actor_rigid_body_index(env, object_handle, 0, gymapi.DOMAIN_SIM)
@@ -499,7 +514,7 @@ class PandaMotionPlanningIsaacGymEnv:
             # add franka
             # Set to 0 to enable self-collision. By default we do not consider self-collision because the collision
             # meshes are too conservative.
-            franka_handle = self.gym.create_actor(env, franka_asset, franka_pose, "franka", i, 0)
+            franka_handle = self.gym.create_actor(env, franka_asset, franka_pose, "franka", i, 0, 1)
             self.franka_handles.append(franka_handle)
             rb_names = self.gym.get_actor_rigid_body_names(env, franka_handle)
             for j in range(len(rb_names)):
@@ -522,6 +537,9 @@ class PandaMotionPlanningIsaacGymEnv:
 
             # set dof properties
             self.gym.set_actor_dof_properties(env, franka_handle, franka_dof_props)
+
+            self.gym.set_rigid_body_segmentation_id(env, franka_handle, 1, 1)
+            self.gym.set_rigid_body_segmentation_id(env, object_handle, 1, 2)
 
             if image_view == 'wrist':
                 # create wrist camera
@@ -885,8 +903,8 @@ class PandaMotionPlanningIsaacGymEnv:
             point_clouds = torch.zeros((self.num_envs, self.pointCloudDownsampleNum, 3), device=self.device)
 
             for i in range(self.num_envs):
-                points_np = depth_image_to_point_cloud_GPU(self.camera_tensors[i], self.camera_view_matrixs[i], self.camera_proj_matrixs[i], self.camera_u2, self.camera_v2, 
-                                                        self.camera_props.width, self.camera_props.height, 1, self.device)
+                points_np = depth_image_to_point_cloud_GPU(self.camera_tensors[i], self.camera_view_matrixs[i], self.camera_proj_matrixs[i], self.camera_seg_tensors[i],
+                                                           self.camera_u2, self.camera_v2, self.camera_props.width, self.camera_props.height, 10, self.device)
                 if points_np.shape[0] > 0:
                     selected_points = self.sample_points(points_np, sample_num=self.pointCloudDownsampleNum, sample_method='random')
                 else:
@@ -926,6 +944,16 @@ class PandaMotionPlanningIsaacGymEnv:
             torch_rgba_tensor = gymtorch.wrap_tensor(camera_rgba_tensor)
             camera_image = torch_rgba_tensor.cpu().numpy()
             camera_image = Im.fromarray(camera_image)
+
+        if self.visualize_pcds:
+            for i in range(self.num_envs):
+                camera_seg_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, self.envs[i], self.cameras[i], gymapi.IMAGE_SEGMENTATION)
+                seg_tensor = gymtorch.wrap_tensor(camera_seg_tensor)
+                seg_tensor = torch.clamp(seg_tensor, -1, 1)
+                self.seg_tensor = scale(seg_tensor, to_torch([0], dtype=torch.float, device=self.device),
+                                                    to_torch([256], dtype=torch.float, device=self.device))
+
+                self.camera_seg_tensors.append(seg_tensor)
 
         return camera_image
 
