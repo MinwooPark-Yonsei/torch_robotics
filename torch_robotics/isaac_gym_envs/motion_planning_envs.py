@@ -109,20 +109,23 @@ def make_gif_from_array(filename, array, fps=10):
     return clip
 
 @torch.jit.script
-def depth_image_to_point_cloud_GPU(camera_tensors, camera_view_matrix_inv, camera_proj_matrix, u, v, width: float,
-                                   height: float, depth_bar: float, device: torch.device):
-    # time1 = time.time()
+def depth_image_to_point_cloud_GPU(camera_tensors, camera_view_matrix_inv, camera_proj_matrix, u, v, width: int,
+                                   height: int, depth_bar: int, device: torch.device):
+    points = []
+
     depth_buffer = camera_tensors.to(device)
 
-    # Get the camera view matrix and invert it to transform points from camera to world space
     vinv = camera_view_matrix_inv
-
-    # Get the camera projection matrix and get the necessary scaling
-    # coefficients for deprojection
-
     proj = camera_proj_matrix
-    fu = 2 / proj[0, 0]
-    fv = 2 / proj[1, 1]
+    
+    fu = 2/proj[0, 0]
+    fv = 2/proj[1, 1]
+
+    width = torch.tensor(width, device=device)
+    height = torch.tensor(height, device=device)
+    depth_bar = torch.tensor(depth_bar, device=device)
+
+    depth_buffer = abs(depth_buffer)
 
     centerU = width / 2
     centerV = height / 2
@@ -132,6 +135,8 @@ def depth_image_to_point_cloud_GPU(camera_tensors, camera_view_matrix_inv, camer
     Y = (v - centerV) / height * Z * fv
 
     Z = Z.view(-1)
+    Z = torch.abs(Z)
+
     valid = Z > -depth_bar
     X = X.view(-1)
     Y = Y.view(-1)
@@ -142,7 +147,6 @@ def depth_image_to_point_cloud_GPU(camera_tensors, camera_view_matrix_inv, camer
     points = position[:, 0:3]
 
     return points
-
 
 class ViewerRecorder:
 
@@ -369,7 +373,7 @@ class PandaMotionPlanningIsaacGymEnv:
 
         # for 3d point cloud
         self.env_origin = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float)
-        self.pointCloudDownsampleNum = 768 * 9
+        self.pointCloudDownsampleNum = 768 * 5
         self.camera_u = torch.arange(0, self.camera_props.width, device=self.device)
         self.camera_v = torch.arange(0, self.camera_props.height, device=self.device)
 
@@ -408,7 +412,6 @@ class PandaMotionPlanningIsaacGymEnv:
         self.obj_idxs = []
         self.hand_idxs = []
         self.obj_pick_idxs = []
-        self.obj_pick_actor_handles = []
 
         self.cameras = []
         self.camera_tensors = []
@@ -446,16 +449,12 @@ class PandaMotionPlanningIsaacGymEnv:
             obj_asset = object_fixed_assets_l[0]
             obj_pose = object_fixed_poses_l[0]
             # for EnvTableObstacles, the first obj is the table
-            if type(self.env).__name__ == 'EnvTableObstacles':
+            if type(env).__name__ == 'EnvTableObstacles':
                 object_handle = self.gym.create_actor(env, obj_asset, obj_pose, "table", i, 0)
                 self.gym.set_rigid_body_color(env, object_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, color_table)
             else:
                 object_handle = self.gym.create_actor(env, obj_asset, obj_pose, "obj_fixed", i, 0)
                 self.gym.set_rigid_body_color(env, object_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, color_obj_fixed)
-                # get global index of object in rigid body state tensor
-            obj_idx = self.gym.get_actor_rigid_body_index(env, object_handle, 0, gymapi.DOMAIN_SIM)
-            self.obj_idxs.append(obj_idx)
-            self.map_rigid_body_idxs_to_env_idx[obj_idx] = i
                 
             # add objects fixed
             for obj_asset, obj_pose in zip(object_fixed_assets_l[1:], object_fixed_poses_l[1:]):
@@ -483,13 +482,12 @@ class PandaMotionPlanningIsaacGymEnv:
                 box_asset = self.gym.create_box(self.sim, box_size, box_size, box_size, asset_options)
 
                 # get proper object pose
-                pick_pos, pick_ori, pick_yaw, place_pos, place_ori, place_yaw = self.env.get_pick_place_poses()
+                pick_pos, pick_ori, place_pos, place_ori = self.env.get_pick_place_poses()
                 obj_pose = gymapi.Transform()
                 obj_pose.p = gymapi.Vec3(*pick_pos)
                 obj_pose.r = gymapi.Quat(pick_ori[1], pick_ori[2], pick_ori[3], pick_ori[0])
                 object_handle = self.gym.create_actor(env, box_asset, obj_pose, "obj_pick_place", i, 0)
                 self.gym.set_rigid_body_color(env, object_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, color_obj_pick)
-                self.obj_pick_actor_handles.append(object_handle)
 
                 # get global index of object in rigid body state tensor
                 obj_idx = self.gym.get_actor_rigid_body_index(env, object_handle, 0, gymapi.DOMAIN_SIM)
@@ -781,33 +779,28 @@ class PandaMotionPlanningIsaacGymEnv:
             franka_handles = franka_handles[:-1]
 
         envs_with_robot_in_contact = []
-        franka_names = self.gym.get_actor_rigid_body_names(envs[0], franka_handles[0])
-
-        for i, (env, franka_handle) in enumerate(zip(envs, franka_handles)):
+        for env, franka_handle in zip(envs, franka_handles):
             rigid_contacts = self.gym.get_env_rigid_contacts(env)
-            for contact in rigid_contacts:
-                assert contact['env0'] == contact['env1']
-                if self.all_robots_in_one_env:
-                    env_idx = self.map_rigid_body_idxs_to_env_idx[body1_idx]
-                else:
+            if self.all_robots_in_one_env:
+                for contact in rigid_contacts:
+                    # body1_idx = contact[2]
+                    # env_idx = self.map_rigid_body_idxs_to_env_idx[body1_idx]
+                    assert contact['env0'] == contact['env1']
                     env_idx = contact['env0']
-                body0_idx = contact['body0']
-                body1_idx = contact['body1']
-                body0_name = self.gym.get_rigid_name(env, body0_idx)
-                body1_name = self.gym.get_rigid_name(env, body1_idx)
-                obj_pick_idx = self.gym.get_actor_rigid_body_index(env, self.obj_pick_actor_handles[i], 0, gymapi.DOMAIN_ENV)
-                # consider only collisions with the robot
-                if body0_name not in franka_names and body1_name not in franka_names:
-                    pass
-                # ignore if it is collision with the obj to pick and place
-                elif body0_idx == obj_pick_idx or body1_idx == obj_pick_idx:
-                    pass
-                elif env_idx in envs_with_robot_in_contact:
-                    pass
-                else:
-                    print(f'{body0_name} (idx: {body0_idx}) collided with {body1_name} (idx: {body1_idx}) in env {env_idx}')
-                    envs_with_robot_in_contact.append(env_idx)
-            i += 1
+                    # body0_idx = contact['body0']
+                    # body1_idx = contact['body1']
+                    # print(f'{self.gym.get_rigid_name(env, body0_idx)} collided with {self.gym.get_rigid_name(env, body1_idx)} in env {env_idx}')
+                    if env_idx in envs_with_robot_in_contact:
+                        pass
+                    else:
+                        envs_with_robot_in_contact.append(env_idx)
+            else:
+                if len(rigid_contacts) > 0:
+                    env_idx = rigid_contacts[0][0]
+                    if env_idx in envs_with_robot_in_contact:
+                        pass
+                    else:
+                        envs_with_robot_in_contact.append(env_idx)
 
         ###############################################################################################################
         if visualize:
@@ -890,35 +883,30 @@ class PandaMotionPlanningIsaacGymEnv:
 
         if self.visualize_pcds:
             point_clouds = torch.zeros((self.num_envs, self.pointCloudDownsampleNum, 3), device=self.device)
+
             for i in range(self.num_envs):
-                # Here is an example. In practice, it's better not to convert tensor from GPU to CPU
-                points = depth_image_to_point_cloud_GPU(self.camera_tensors[i], self.camera_view_matrixs[i], self.camera_proj_matrixs[i], self.camera_u2, self.camera_v2, self.camera_props.width, self.camera_props.height, 10, self.device)
-                if points.shape[0] > 0:
-                    selected_points = self.sample_points(points, sample_num=self.pointCloudDownsampleNum, sample_mathed='random')
+                points_np = depth_image_to_point_cloud_GPU(self.camera_tensors[i], self.camera_view_matrixs[i], self.camera_proj_matrixs[i], self.camera_u2, self.camera_v2, 
+                                                        self.camera_props.width, self.camera_props.height, 1, self.device)
+                if points_np.shape[0] > 0:
+                    selected_points = self.sample_points(points_np, sample_num=self.pointCloudDownsampleNum, sample_method='random')
                 else:
                     selected_points = torch.zeros((self.num_envs, self.pointCloudDownsampleNum, 3), device=self.device)
 
-                # print(f"selected_points shape: {selected_points[0].shape}")
-                # print(f"point_clouds[i] shape: {point_clouds[i].shape}")
-
-                point_clouds[i] = selected_points[0]
+                point_clouds[i] = selected_points
 
             if self.pointCloudVisualizer != None :
                 import open3d as o3d
                 points = point_clouds[0, :, :3].cpu().numpy()
-                # colors = plt.get_cmap()(point_clouds[0, :, 3].cpu().numpy())
                 self.o3d_pc.points = o3d.utility.Vector3dVector(points)
-                # self.o3d_pc.colors = o3d.utility.Vector3dVector(colors[..., :3])
 
-                if self.pointCloudVisualizerInitialized == False :
-                    self.pointCloudVisualizer.add_geometry(self.o3d_pc)
-                    self.pointCloudVisualizerInitialized = True
-                else :
-                    self.pointCloudVisualizer.update(self.o3d_pc)
+            if self.pointCloudVisualizerInitialized == False :
+                self.pointCloudVisualizer.add_geometry(self.o3d_pc)
+                self.pointCloudVisualizerInitialized = True
+            else :
+                self.pointCloudVisualizer.update(self.o3d_pc)
 
+            self.gym.end_access_image_tensors(self.sim)
             point_clouds -= self.env_origin.view(self.num_envs, 1, 3)
-
-            point_clouds_flattened = point_clouds.view(self.num_envs, self.pointCloudDownsampleNum * 3)
 
         self.gym.end_access_image_tensors(self.sim)
 
@@ -945,11 +933,11 @@ class PandaMotionPlanningIsaacGymEnv:
         row_total = tensor.shape[0]
         return tensor[torch.randint(low=0, high=row_total, size=(dim_needed,)),:]
 
-    def sample_points(self, points, sample_num=1000, sample_mathed='furthest'):
+    def sample_points(self, points, sample_num=1000, sample_method='furthest'):
         eff_points = points[points[:, 2]>0.04]
         if eff_points.shape[0] < sample_num :
             eff_points = points
-        if sample_mathed == 'random':
+        if sample_method == 'random':
             sampled_points = self.rand_row(eff_points, sample_num)
         return sampled_points
 
@@ -1010,11 +998,11 @@ class MotionPlanningController:
             joint_states, envs_with_robot_in_contact = self.mp_env.step(actions, visualize=visualize, render_viewer_camera=render_viewer_camera)
             envs_with_robot_in_contact_l.append(envs_with_robot_in_contact)
             # stop the trajectory if the robots was in contact with the environments
-            if len(envs_with_robot_in_contact) > 0:
-                if self.mp_env.controller_type == 'position':
-                    trajectories_copy[i:, envs_with_robot_in_contact, :] = actions[envs_with_robot_in_contact, :]
-                elif self.mp_env.controller_type == 'velocity':
-                    trajectories_copy[i:, envs_with_robot_in_contact, :] = 0.
+            # if len(envs_with_robot_in_contact) > 0:
+            #     if self.mp_env.controller_type == 'position':
+            #         trajectories_copy[i:, envs_with_robot_in_contact, :] = actions[envs_with_robot_in_contact, :]
+            #     elif self.mp_env.controller_type == 'velocity':
+            #         trajectories_copy[i:, envs_with_robot_in_contact, :] = 0.
 
         # last steps -- keep robots in place
         if self.mp_env.controller_type == 'position':
