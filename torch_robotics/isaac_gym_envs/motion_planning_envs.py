@@ -247,6 +247,8 @@ class PandaMotionPlanningIsaacGymEnv:
                  visualize_pcds=False,
                  image_view='topdown',  # 'topdown' or 'wrist'
                  pick_place=False,
+                 pick_pose=None,
+                 place_pose=None,
                  **kwargs,
     ):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -438,10 +440,6 @@ class PandaMotionPlanningIsaacGymEnv:
         color_obj_extra = gymapi.Vec3(1., 0., 0.)
         color_obj_pick = gymapi.Vec3(0., 0., 1.)
 
-        # pick and place objects
-        self.obj_pick_poses = []
-        self.obj_place_poses = []
-
         # create env
         if self.all_robots_in_one_env:
             env = self.gym.create_env(self.sim, env_lower, env_upper, num_per_row)
@@ -497,7 +495,16 @@ class PandaMotionPlanningIsaacGymEnv:
                 box_asset = self.gym.create_box(self.sim, box_size, box_size, box_size, asset_options)
 
                 # get proper object pose
-                pick_pos, pick_ori, place_pos, place_ori = self.env.get_pick_place_poses()
+                if pick_pose is None or place_pose is None:
+                    pos, ori, yaw = self.env.get_pick_place_poses(num_poses=2)
+                    pick_pos, pick_ori = pos[0], ori[0]
+                    place_pos, place_ori = pos[1], ori[1]
+                if pick_pose is not None:
+                    pick_pos = pick_pose[:3]
+                    pick_ori = pick_pose[3:]
+                if place_pose is not None:
+                    place_pos = place_pose[:3]
+                    place_ori = place_pose[3:]
                 obj_pose = gymapi.Transform()
                 obj_pose.p = gymapi.Vec3(*pick_pos)
                 obj_pose.r = gymapi.Quat(pick_ori[1], pick_ori[2], pick_ori[3], pick_ori[0])
@@ -508,8 +515,6 @@ class PandaMotionPlanningIsaacGymEnv:
                 obj_idx = self.gym.get_actor_rigid_body_index(env, object_handle, 0, gymapi.DOMAIN_SIM)
                 self.obj_pick_idxs.append(obj_idx)
                 self.map_rigid_body_idxs_to_env_idx[obj_idx] = i
-                self.obj_pick_poses.append(pick_pos + pick_ori)
-                self.obj_place_poses.append(place_pos + place_ori)
 
             # add franka
             # Set to 0 to enable self-collision. By default we do not consider self-collision because the collision
@@ -685,12 +690,13 @@ class PandaMotionPlanningIsaacGymEnv:
             shape = list(start_joint_positions.shape)
             shape[-1] += 1
             start_joint_positions_copy = torch.zeros(shape)
-            for i in range(len(start_joint_positions)):
-                if start_joint_positions[i][-1] <= 0.5:  # gripper open
-                    start_joint_positions_copy[i] = torch.cat((start_joint_positions[i][:-1], torch.tensor([0.04, 0.04], device=self.device)))
-                elif start_joint_positions[i][-1] > 0.5:  # gripper close
-                    start_joint_positions_copy[i] = torch.cat((start_joint_positions[i][:-1], torch.tensor([0.0225, 0.0225], device=self.device)))
-        
+            start_joint_positions_copy[..., :-1] = start_joint_positions.clone()
+            open_gripper = start_joint_positions[..., -1] <= 0.5
+            close_gripper = start_joint_positions[..., -1] > 0.5
+
+            start_joint_positions_copy[open_gripper, -1] = 0.04
+            start_joint_positions_copy[close_gripper, -1] = 0.01
+
         start_joint_positions = start_joint_positions_copy
 
         assert start_joint_positions.ndim == 2
@@ -768,12 +774,12 @@ class PandaMotionPlanningIsaacGymEnv:
         else:
             action_dof[..., :7] = actions[..., :7]
 
-        for i in range(len(actions)):
-            # gripper state (0: open, 1: close)
-            if actions[i][7] <= 0.5:
-                action_dof[..., 7:9] = torch.tensor([[0.04, 0.04]] * self.num_envs)
-            elif actions[i][7] > 0.5:
-                action_dof[..., 7:9] = torch.tensor([[0.0225, 0.0225]] * self.num_envs)
+        # gripper state (0: open, 1: close)
+        open_gripper = actions[..., 7] <= 0.5
+        close_gripper = actions[..., 7] > 0.5
+
+        action_dof[open_gripper, 7:9] = 0.04
+        action_dof[close_gripper, 7:9] = 0.01
 
         ###############################################################################################################
         # Deploy actions
@@ -1000,7 +1006,7 @@ class MotionPlanningController:
 
         H, B, D = trajectories.shape
 
-        trajectories_copy = trajectories.clone()
+        trajectories_copy = trajectories.detach().clone()
 
         # start at the initial position
         joint_states = self.mp_env.reset(start_joint_positions=start_states_joint_pos, goal_joint_position=goal_state_joint_pos)
