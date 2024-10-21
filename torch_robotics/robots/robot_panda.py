@@ -36,10 +36,11 @@ class RobotPanda(RobotBase):
                  use_self_collision_storm=False,
                  use_collision_spheres=True,
                  grasped_object=None,
+                 gripper=False,
                  tensor_args=None,
                  **kwargs):
 
-        self.gripper = False
+        self.gripper = gripper
 
         ##########################################################################################
         # Differentiable robots model
