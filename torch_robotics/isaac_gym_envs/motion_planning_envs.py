@@ -855,7 +855,7 @@ class PandaMotionPlanningIsaacGymEnv:
                 ee_pose = props['pose'][:][body_dict[self.franka_hand]]
                 ee_transform = gymapi.Transform(p=gymapi.Vec3(*ee_pose[0]), r=gymapi.Quat(*ee_pose[1]))
                 # reference frame
-                gymutil.draw_lines(self.axes_geom, self.gym, self.viewer, env, ee_transform)
+                # gymutil.draw_lines(self.axes_geom, self.gym, self.viewer, env, ee_transform)
 
                 # color frankas in collision
                 if self.collor_robots_in_collision:
