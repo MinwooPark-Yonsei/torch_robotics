@@ -761,6 +761,9 @@ class PandaMotionPlanningIsaacGymEnv:
 
     def step(self, actions, visualize=True, render_viewer_camera=True):
         ###############################################################################################################
+        # Update full state, including point cloud
+        rgb_images_before_step = self.compute_full_state()
+
         # step the physics
         self.gym.simulate(self.sim)
         self.gym.fetch_results(self.sim, True)
@@ -926,21 +929,26 @@ class PandaMotionPlanningIsaacGymEnv:
                 self.viewer_recorder.append(self.step_idx, viewer_img)
                 self.gym.start_access_image_tensors(self.sim)
 
-        # Update full state, including point cloud
-        self.compute_full_state()
-
         self.step_idx += 1
 
         # Get current joint states
         joint_states_curr = gymtorch.wrap_tensor(self.gym.acquire_dof_state_tensor(self.sim)).view(self.num_envs, 9, 2)
         if self.show_goal_configuration:
             joint_states_curr = joint_states_curr[:-1, ...]
-        return joint_states_curr, envs_with_robot_in_contact
+        return joint_states_curr, envs_with_robot_in_contact, rgb_images_before_step
 
     def compute_full_state(self):
+        num_cameras = len(self.cameras)
         self.camera_rgba_debug_fig = plt.figure("CAMERA_RGBD_DEBUG")
-        camera_rgba_image = self.camera_visualization(env=self.envs[0], camera=self.cameras[0], is_depth_image=False)
-        plt.imshow(camera_rgba_image)
+        grid_size = int(np.ceil(np.sqrt(num_cameras)))
+        camera_images = np.empty((num_cameras, self.camera_props.width, self.camera_props.height, 3))
+        for i in range(num_cameras):
+            camera_rgba_image = self.camera_visualization(env=self.envs[i], camera=self.cameras[i], is_depth_image=False)
+            camera_images[i] = np.array(camera_rgba_image)[..., :3]
+            plt.subplot(grid_size, grid_size, i + 1)
+            plt.imshow(camera_rgba_image)
+            plt.title(f'Camera {i}')
+        plt.tight_layout()
         plt.pause(1e-9)
 
         if self.visualize_pcds:
@@ -971,6 +979,8 @@ class PandaMotionPlanningIsaacGymEnv:
             point_clouds -= self.env_origin.view(self.num_envs, 1, 3)
 
         self.gym.end_access_image_tensors(self.sim)
+
+        return camera_images
 
     def camera_visualization(self, env, camera, is_depth_image=False):
         if is_depth_image:
@@ -1037,7 +1047,8 @@ class MotionPlanningController:
             render_viewer_camera=True,
             make_video=False,
             video_path='./trajs_replay.mp4',
-            make_gif=False
+            make_gif=False,
+            get_image_array=False,
     ):
         assert start_states_joint_pos is not None
         assert goal_state_joint_pos is not None
@@ -1045,6 +1056,9 @@ class MotionPlanningController:
         H, B, D = trajectories.shape
 
         trajectories_copy = trajectories.detach().clone()
+
+        if get_image_array:
+            images_before_actions = np.zeros((H, B, self.mp_env.camera_props.width, self.mp_env.camera_props.height, 3))
 
         # start at the initial position
         joint_states = self.mp_env.reset(start_joint_positions=start_states_joint_pos, goal_joint_position=goal_state_joint_pos)
@@ -1056,9 +1070,9 @@ class MotionPlanningController:
             if self.mp_env.check_viewer_has_closed():
                 break
             if self.mp_env.controller_type == 'position':
-                _, _ = self.mp_env.step(joint_positions_start, visualize=visualize, render_viewer_camera=render_viewer_camera)
+                _, _, _ = self.mp_env.step(joint_positions_start, visualize=visualize, render_viewer_camera=render_viewer_camera)
             elif self.mp_env.controller_type == 'velocity':
-                _, _ = self.mp_env.step(joint_velocities_zero, visualize=visualize, render_viewer_camera=render_viewer_camera)
+                _, _, _ = self.mp_env.step(joint_velocities_zero, visualize=visualize, render_viewer_camera=render_viewer_camera)
             else:
                 raise NotImplementedError
 
@@ -1067,8 +1081,10 @@ class MotionPlanningController:
         for i, actions in enumerate(trajectories_copy):
             if self.mp_env.check_viewer_has_closed():
                 break
-            joint_states, envs_with_robot_in_contact = self.mp_env.step(actions, visualize=visualize, render_viewer_camera=render_viewer_camera)
+            joint_states, envs_with_robot_in_contact, images = self.mp_env.step(actions, visualize=visualize, render_viewer_camera=render_viewer_camera)
             envs_with_robot_in_contact_l.append(envs_with_robot_in_contact)
+            if get_image_array:
+                images_before_actions[i] = images
             # stop the trajectory if the robots was in contact with the environments
             # if len(envs_with_robot_in_contact) > 0:
             #     if self.mp_env.controller_type == 'position':
@@ -1083,13 +1099,13 @@ class MotionPlanningController:
             for _ in range(n_last_steps):
                 if self.mp_env.check_viewer_has_closed():
                     break
-                _, _ = self.mp_env.step(joint_positions_last, visualize=visualize, render_viewer_camera=render_viewer_camera)
+                _, _, _ = self.mp_env.step(joint_positions_last, visualize=visualize, render_viewer_camera=render_viewer_camera)
         elif self.mp_env.controller_type == 'velocity':
             # apply zero velocity
             for _ in range(n_last_steps):
                 if self.mp_env.check_viewer_has_closed():
                     break
-                _, _ = self.mp_env.step(joint_velocities_zero, visualize=visualize, render_viewer_camera=render_viewer_camera)
+                _, _, _ = self.mp_env.step(joint_velocities_zero, visualize=visualize, render_viewer_camera=render_viewer_camera)
         else:
             raise NotImplementedError
 
@@ -1110,6 +1126,9 @@ class MotionPlanningController:
                     envs_with_robot_in_contact_unique.append(idx)
 
         print(f'trajectories free in Isaac: {B-len(envs_with_robot_in_contact_unique)}/{B}')
+
+        if get_image_array:
+            return images_before_actions
 
 
 if __name__ == '__main__':
