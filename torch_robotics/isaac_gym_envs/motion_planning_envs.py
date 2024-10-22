@@ -429,6 +429,7 @@ class PandaMotionPlanningIsaacGymEnv:
         self.hand_idxs = []
         self.obj_pick_idxs = []
         self.obj_pick_actor_handles = []
+        self.place_poses = []
 
         self.cameras = []
         self.camera_tensors = []
@@ -516,6 +517,7 @@ class PandaMotionPlanningIsaacGymEnv:
                 object_handle = self.gym.create_actor(env, box_asset, obj_pose, "obj_pick_place", i, 0)
                 self.gym.set_rigid_body_color(env, object_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, color_obj_pick)
                 self.obj_pick_actor_handles.append(object_handle)
+                self.place_poses.append([place_pos, place_ori])
 
                 # get global index of object in rigid body state tensor
                 obj_idx = self.gym.get_actor_rigid_body_index(env, object_handle, 0, gymapi.DOMAIN_SIM)
@@ -856,6 +858,32 @@ class PandaMotionPlanningIsaacGymEnv:
                 ee_transform = gymapi.Transform(p=gymapi.Vec3(*ee_pose[0]), r=gymapi.Quat(*ee_pose[1]))
                 # reference frame
                 # gymutil.draw_lines(self.axes_geom, self.gym, self.viewer, env, ee_transform)
+
+                # draw a square at place pose
+                square_size = 0.05
+                local_square_points = [
+                    (-square_size/2, -square_size/2, 0),
+                    (square_size/2, -square_size/2, 0),
+                    (square_size/2, square_size/2, 0),
+                    (-square_size/2, square_size/2, 0)
+                ]
+                place_pos = self.place_poses[k][0]
+                place_pos[2] = 0
+                place_ori = self.place_poses[k][1]
+                place_transform = gymapi.Transform()
+                place_transform.p = gymapi.Vec3(*place_pos)
+                place_transform.r = gymapi.Quat(place_ori[1], place_ori[2], place_ori[3], place_ori[0])
+                verts = np.empty((4, 2), dtype=gymapi.Vec3.dtype)
+                for j in range(4):
+                    p1 = local_square_points[j]
+                    p2 = local_square_points[(j + 1) % 4]  # connect last point to the first
+                    verts[j][0] = p1
+                    verts[j][1] = p2
+                verts = place_transform.transform_points(verts)
+                colors = np.empty(4, gymapi.Vec3.dtype)
+                for l in range(4):
+                    colors[l] = (1.0, 0.0, 0.0) # red
+                self.gym.add_lines(self.viewer, env, 4, verts, colors)
 
                 # color frankas in collision
                 if self.collor_robots_in_collision:
