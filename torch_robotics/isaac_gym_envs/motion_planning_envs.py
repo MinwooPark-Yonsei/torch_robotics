@@ -381,8 +381,8 @@ class PandaMotionPlanningIsaacGymEnv:
 
         # camera properties
         self.camera_props = gymapi.CameraProperties()
-        self.camera_props.width = 256
-        self.camera_props.height = 256
+        self.camera_props.width = 128
+        self.camera_props.height = 128
         self.camera_props.enable_tensors = True
         self.default_cam_pos = gymapi.Vec3(0, 2.25, 1)
         self.default_cam_stare = gymapi.Vec3(0, -3, -1.25)
@@ -569,7 +569,7 @@ class PandaMotionPlanningIsaacGymEnv:
             elif image_view == 'topdown':
                 # create topdown camera
                 camera_handle = self.gym.create_camera_sensor(env, self.camera_props)
-                self.gym.set_camera_location(camera_handle, env, franka_pose.p + gymapi.Vec3(0, 0.5, 1.2), franka_pose.p + gymapi.Vec3(0, 0.49, 0))
+                self.gym.set_camera_location(camera_handle, env, franka_pose.p + gymapi.Vec3(0, 0.5, 1.0), franka_pose.p + gymapi.Vec3(0, 0.499, 0))
 
             else:
                 raise NotImplementedError
@@ -940,14 +940,24 @@ class PandaMotionPlanningIsaacGymEnv:
     def compute_full_state(self):
         num_cameras = len(self.cameras)
         self.camera_rgba_debug_fig = plt.figure("CAMERA_RGBD_DEBUG")
-        grid_size = int(np.ceil(np.sqrt(num_cameras)))
-        camera_images = np.empty((num_cameras, self.camera_props.width, self.camera_props.height, 3))
+        camera_images = np.empty((num_cameras, self.camera_props.width, self.camera_props.height, 4))
         for i in range(num_cameras):
             camera_rgba_image = self.camera_visualization(env=self.envs[i], camera=self.cameras[i], is_depth_image=False)
-            camera_images[i] = np.array(camera_rgba_image)[..., :3]
-            plt.subplot(grid_size, grid_size, i + 1)
+            camera_depth_image = self.camera_visualization(env=self.envs[i], camera=self.cameras[i], is_depth_image=True)
+            if np.max(camera_depth_image) > 0:
+                camera_depth_image = np.array(camera_depth_image) / np.max(camera_depth_image)
+            camera_images[i, ..., :3] = np.array(camera_rgba_image)[..., :3]
+            camera_images[i, ..., -1] = np.array(camera_depth_image)
+
+            plt.subplot(2, num_cameras, i + 1)  # RGB images
             plt.imshow(camera_rgba_image)
-            plt.title(f'Camera {i}')
+            plt.title(f'Camera {i} RGB')
+            plt.axis('off')
+
+            plt.subplot(2, num_cameras, num_cameras + i + 1)  # Depth images
+            plt.imshow(camera_depth_image, cmap='gray')
+            plt.title(f'Camera {i} Depth')
+            plt.axis('off')
         plt.tight_layout()
         plt.pause(1e-9)
 
@@ -1058,7 +1068,7 @@ class MotionPlanningController:
         trajectories_copy = trajectories.detach().clone()
 
         if get_image_array:
-            images_before_actions = np.zeros((H, B, self.mp_env.camera_props.width, self.mp_env.camera_props.height, 3))
+            images_before_actions = np.zeros((H, B, self.mp_env.camera_props.width, self.mp_env.camera_props.height, 4))
 
         # start at the initial position
         joint_states = self.mp_env.reset(start_joint_positions=start_states_joint_pos, goal_joint_position=goal_state_joint_pos)
