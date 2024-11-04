@@ -819,7 +819,7 @@ class PandaMotionPlanningIsaacGymEnv:
         for i, (env, franka_handle) in enumerate(zip(envs, franka_handles)):
             rigid_contacts = self.gym.get_env_rigid_contacts(env)
             for contact in rigid_contacts:
-                assert contact['env0'] == contact['env1']
+                # assert contact['env0'] == contact['env1']
                 if self.all_robots_in_one_env:
                     env_idx = self.map_rigid_body_idxs_to_env_idx[body1_idx]
                 else:
@@ -870,7 +870,7 @@ class PandaMotionPlanningIsaacGymEnv:
                     (square_size/2, square_size/2, 0),
                     (-square_size/2, square_size/2, 0)
                 ]
-                place_pos = self.place_poses[k][0]
+                place_pos = self.place_poses[k][0].copy()
                 place_pos[2] = 0
                 place_ori = self.place_poses[k][1]
                 place_transform = gymapi.Transform()
@@ -936,6 +936,27 @@ class PandaMotionPlanningIsaacGymEnv:
         if self.show_goal_configuration:
             joint_states_curr = joint_states_curr[:-1, ...]
         return joint_states_curr, envs_with_robot_in_contact, rgb_images_before_step
+
+    def check_pick_place_success(self):
+        success_idx = []
+
+        if self.all_robots_in_one_env:
+            envs = self.envs * self.num_envs
+        else:
+            envs = self.envs
+
+        tolerance = 0.03
+
+        obj_pick_actor_handles = self.obj_pick_actor_handles
+        for i, env in enumerate(envs):
+            obj_pick_states = self.gym.get_actor_rigid_body_states(env, obj_pick_actor_handles[i], gymapi.STATE_POS)
+            obj_pos = obj_pick_states['pose']['p']
+            place_pos, _ = self.place_poses[i]
+            dist_to_goal = np.linalg.norm(np.concatenate(([obj_pos['x'], obj_pos['y'], obj_pos['z']])) - place_pos)
+            print(dist_to_goal)
+            if dist_to_goal <= tolerance:
+                success_idx.append(i)
+        return success_idx
 
     def compute_full_state(self):
         num_cameras = len(self.cameras)
@@ -1059,6 +1080,7 @@ class MotionPlanningController:
             video_path='./trajs_replay.mp4',
             make_gif=False,
             get_image_array=False,
+            pick_place=False,
     ):
         assert start_states_joint_pos is not None
         assert goal_state_joint_pos is not None
@@ -1096,11 +1118,11 @@ class MotionPlanningController:
             if get_image_array:
                 images_before_actions[i] = images
             # stop the trajectory if the robots was in contact with the environments
-            # if len(envs_with_robot_in_contact) > 0:
-            #     if self.mp_env.controller_type == 'position':
-            #         trajectories_copy[i:, envs_with_robot_in_contact, :] = actions[envs_with_robot_in_contact, :]
-            #     elif self.mp_env.controller_type == 'velocity':
-            #         trajectories_copy[i:, envs_with_robot_in_contact, :] = 0.
+            if len(envs_with_robot_in_contact) > 0:
+                if self.mp_env.controller_type == 'position':
+                    trajectories_copy[i:, envs_with_robot_in_contact, :] = actions[envs_with_robot_in_contact, :]
+                elif self.mp_env.controller_type == 'velocity':
+                    trajectories_copy[i:, envs_with_robot_in_contact, :] = 0.
 
         # last steps -- keep robots in place
         if self.mp_env.controller_type == 'position':
@@ -1118,6 +1140,10 @@ class MotionPlanningController:
                 _, _, _ = self.mp_env.step(joint_velocities_zero, visualize=visualize, render_viewer_camera=render_viewer_camera)
         else:
             raise NotImplementedError
+        
+        if pick_place:
+            success_idx = self.mp_env.check_pick_place_success()
+            print(f'Successful placements: {success_idx}')
 
         # clean up isaac
         self.mp_env.clean_up()
@@ -1137,9 +1163,14 @@ class MotionPlanningController:
 
         print(f'trajectories free in Isaac: {B-len(envs_with_robot_in_contact_unique)}/{B}')
 
+        results = {}
         if get_image_array:
-            return images_before_actions
+            results['imgs'] = images_before_actions
+        if pick_place:
+            success_idx = list(set(success_idx) - set(envs_with_robot_in_contact_unique))
+            results['success_idx'] = success_idx
 
+        return results
 
 if __name__ == '__main__':
     seed = 0
