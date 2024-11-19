@@ -384,8 +384,10 @@ class PandaMotionPlanningIsaacGymEnv:
         self.camera_props.width = 128
         self.camera_props.height = 128
         self.camera_props.enable_tensors = True
-        self.default_cam_pos = gymapi.Vec3(0, 2.25, 1)
-        self.default_cam_stare = gymapi.Vec3(0, -3, -1.25)
+        # self.default_cam_pos = gymapi.Vec3(0, 2.25, 1)
+        # self.default_cam_stare = gymapi.Vec3(0, -3, -1.25)
+        self.default_cam_pos = gymapi.Vec3(2.25, 0, 1)
+        self.default_cam_stare = gymapi.Vec3(-3, 0, -1.25)
 
         # for 3d point cloud
         self.env_origin = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float)
@@ -421,7 +423,7 @@ class PandaMotionPlanningIsaacGymEnv:
         # robots pose
         franka_pose = gymapi.Transform()
         franka_pose.p = gymapi.Vec3(0, 0, 0)
-        franka_pose.r = gymapi.Quat(0, 0, np.sqrt(2) / 2, np.sqrt(2) / 2)
+        # franka_pose.r = gymapi.Quat(0, 0, np.sqrt(2) / 2, np.sqrt(2) / 2)
 
         self.envs = []
         self.franka_handles = []
@@ -569,7 +571,8 @@ class PandaMotionPlanningIsaacGymEnv:
             elif image_view == 'topdown':
                 # create topdown camera
                 camera_handle = self.gym.create_camera_sensor(env, self.camera_props)
-                self.gym.set_camera_location(camera_handle, env, franka_pose.p + gymapi.Vec3(0, 0.5, 1.0), franka_pose.p + gymapi.Vec3(0, 0.499, 0))
+                # self.gym.set_camera_location(camera_handle, env, franka_pose.p + gymapi.Vec3(0, 0.5, 1.0), franka_pose.p + gymapi.Vec3(0, 0.499, 0))
+                self.gym.set_camera_location(camera_handle, env, franka_pose.p + gymapi.Vec3(0.5, 0, 1.0), franka_pose.p + gymapi.Vec3(0.499, 0, 0))
 
             else:
                 raise NotImplementedError
@@ -587,8 +590,10 @@ class PandaMotionPlanningIsaacGymEnv:
         ###############################################################################################################
         # CAMERA1
         # point camera at middle env
-        middle_cam_pos = gymapi.Vec3(0, 2.25, 1)
-        middle_cam_target = gymapi.Vec3(0, -3, -1.25)
+        # middle_cam_pos = gymapi.Vec3(0, 2.25, 1)
+        # middle_cam_target = gymapi.Vec3(0, -3, -1.25)
+        middle_cam_pos = gymapi.Vec3(2.25, 0, 1)
+        middle_cam_target = gymapi.Vec3(-3, 0, -1.25)
         if len(self.envs) == 1:
             self.middle_cam_env = self.envs[0]
         else:
