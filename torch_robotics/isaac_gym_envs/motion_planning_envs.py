@@ -707,8 +707,8 @@ class PandaMotionPlanningIsaacGymEnv:
             open_gripper = start_joint_positions[..., -1] <= 0.5
             close_gripper = start_joint_positions[..., -1] > 0.5
 
-            start_joint_positions_copy[open_gripper, -1] = 0.04
-            start_joint_positions_copy[close_gripper, -1] = 0.01
+            start_joint_positions_copy[open_gripper, -2:] = 0.04
+            start_joint_positions_copy[close_gripper, -2:] = 0.01
 
         start_joint_positions = start_joint_positions_copy
 
